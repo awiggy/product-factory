@@ -3,7 +3,9 @@
 
 import json
 import os
+import subprocess
 import sys
+import time
 
 args = sys.argv[1:]
 log = os.environ.get("FAKE_CODEX_LOG")
@@ -21,6 +23,49 @@ if args[:2] == ["login", "status"]:
 
 def out(obj):
     print(json.dumps(obj, ensure_ascii=False), flush=True)
+
+
+if args[:1] == ["app-server"]:
+    mode = os.environ.get("FAKE_CODEX_MODELS_MODE", "pages")
+    initialized = False
+    for line in sys.stdin:
+        request = json.loads(line)
+        if log:
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"request": request}) + "\n")
+        if request["method"] == "initialize":
+            out({"id": request["id"], "result": {"userAgent": "test"}})
+        elif request["method"] == "initialized":
+            initialized = True
+        elif request["method"] == "model/list" and initialized:
+            if mode == "hang":
+                time.sleep(30)
+            elif mode == "descendant_hang":
+                subprocess.Popen([sys.executable, "-c",
+                                  "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"])
+                time.sleep(30)
+            elif mode == "error":
+                out({"id": request["id"], "error": {"message": "secret-test-token"}})
+            elif mode == "invalid":
+                out({"id": request["id"], "result": {"data": "bad"}})
+            elif mode == "empty":
+                out({"id": request["id"], "result": {"data": [], "nextCursor": None}})
+            elif mode == "repeat_cursor":
+                out({"id": request["id"], "result": {"data": [], "nextCursor": "same"}})
+            else:
+                out({"method": "test/notification", "params": {"token": "secret-test-token"}})
+                if not request["params"].get("cursor"):
+                    rows = [{"id": "catalog-id", "model": "gpt-test-a", "displayName": "Test A", "hidden": False,
+                             "token": "secret-test-token"},
+                            {"model": "hidden-test", "hidden": True}, {"model": "bad model"}]
+                    cursor = "page-2"
+                else:
+                    rows = [{"model": "gpt-test-a"}, {"model": "custom/provider-model", "displayName": "Custom"}]
+                    cursor = None
+                out({"id": request["id"], "result": {"data": rows, "nextCursor": cursor}})
+        else:
+            out({"id": request.get("id"), "error": {"message": "Unexpected request"}})
+    sys.exit(0)
 
 
 cwd = args[args.index("--cd") + 1] if "--cd" in args else os.getcwd()

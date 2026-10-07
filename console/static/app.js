@@ -764,8 +764,10 @@ function paintExecCards() {
     </div>
     <div data-csource="api_key" ${c.codex_source === "api_key" ? "" : "hidden"}><div class="field">${keyRow("openai", info && info.openai_key)}</div></div>
     <div class="field"><span class="field-label">模型</span>
-      ${modelPicker("codex_model", c.codex_model, [], det.codex && det.codex.default_model ? `默认（Codex 设置里的 ${det.codex.default_model}）` : "默认（跟随 Codex 的设置）")}
-      <div class="hint">Codex 不提供模型列表，需要别的模型时选“其他”手动填写。</div></div>
+      ${modelPicker("codex_model", c.codex_model, [{ items: (det.codex && det.codex.models) || [] }],
+        det.codex && det.codex.default_model ? `默认（Codex 设置里的 ${det.codex.default_model}）` : "默认（跟随 Codex 的设置）")}
+      <div class="hint">${det.codex && det.codex.models_message ? esc(det.codex.models_message) : ""}${det.codex && det.codex.models_source === "cache" && det.codex.models_fetched_at ? `（缓存时间：${esc(timeShort(det.codex.models_fetched_at))}）` : ""}
+        模型目录不保证当前账号或 API Key 的调用权限；不确定时选“默认”，列表里没有的选“其他”手动填写。</div></div>
     <p class="hint">Codex 在沙箱里工作：只能改产品文件夹；开发、评测、上线阶段才允许联网。它不能按文件细分权限，所以需求和架构阶段也能改到代码文件，控制台会在每次运行后检查状态文件。</p>
     <details class="small"><summary class="muted" style="cursor:pointer">命令路径</summary>
       <label class="field" style="margin-top:8px"><span>Codex 命令</span><input type="text" name="codex_path" value="${esc(c.codex_path || "codex")}"></label></details>`;

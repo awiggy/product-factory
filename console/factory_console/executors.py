@@ -7,10 +7,14 @@
 import glob
 import json
 import os
+import queue
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import SKILLS_ROOT
@@ -195,6 +199,168 @@ def codex_default_model():
     return m.group(1) if m else ""
 
 
+def _codex_model_items(rows, cached=False, api_key=False):
+    """只回传下拉需要的字段，忽略目录中的身份、凭据与隐藏型号。"""
+    out, seen = [], set()
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if cached:
+            if row.get("visibility") != "list" or (api_key and row.get("supported_in_api") is False):
+                continue
+            value, name = row.get("slug"), row.get("display_name")
+        else:
+            if row.get("hidden"):
+                continue
+            value, name = row.get("model") or row.get("id"), row.get("displayName")
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._:/\[\]@+-]{1,120}", value) or value in seen:
+            continue
+        seen.add(value)
+        out.append({"value": value, "label": name[:160] if isinstance(name, str) and name else value})
+    return out
+
+
+def _codex_app_server_models(path, cfg, timeout=10):
+    """官方只读 model/list；不创建对话、不推理、不发起登录，也不回传原始错误。"""
+    proc = None
+    reader = None
+    messages = queue.Queue()
+    deadline = time.monotonic() + timeout
+    try:
+        # CODEX_API_KEY 是 exec 的参数来源，不能用它假装 app-server 已切换登录。
+        # 目录沿用本机 Codex 登录/配置；工厂保存的 Key 不参与本次目录查询。
+        env = run_env(dict(cfg, executor="codex", codex_source="account"))
+        proc = subprocess.Popen([path, "app-server", "--listen", "stdio://"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, encoding="utf-8", errors="replace", env=_tool_env(path, env),
+                                start_new_session=os.name == "posix")
+
+        def read_lines():
+            try:
+                for line in proc.stdout:
+                    messages.put(line)
+            finally:
+                proc.stdout.close()
+                messages.put(None)
+
+        reader = threading.Thread(target=read_lines, daemon=True)
+        reader.start()
+
+        def send(message):
+            proc.stdin.write(json.dumps(message) + "\n")
+            proc.stdin.flush()
+
+        def response(request_id):
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError()
+                line = messages.get(timeout=remaining)
+                if line is None:
+                    raise ValueError("app-server closed")
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(message, dict) or message.get("id") != request_id:
+                    continue
+                if "error" in message or not isinstance(message.get("result"), dict):
+                    raise ValueError("app-server request failed")
+                return message["result"]
+
+        send({"id": 0, "method": "initialize", "params": {
+            "clientInfo": {"name": "product_factory", "title": "产品工厂", "version": "0.4.0"}}})
+        response(0)
+        send({"method": "initialized", "params": {}})
+        rows, cursors = [], set()
+        cursor = None
+        for request_id in range(1, 51):
+            params = {"limit": 100, "includeHidden": False}
+            if cursor is not None:
+                params["cursor"] = cursor
+            send({"id": request_id, "method": "model/list", "params": params})
+            result = response(request_id)
+            if not isinstance(result.get("data"), list):
+                raise ValueError("invalid model list")
+            rows.extend(result["data"])
+            cursor = result.get("nextCursor")
+            if cursor is None:
+                return _codex_model_items(rows)
+            if not isinstance(cursor, str) or not cursor or cursor in cursors:
+                raise ValueError("invalid model cursor")
+            cursors.add(cursor)
+        return None
+    except (OSError, ValueError, TimeoutError, queue.Empty):
+        return None
+    finally:
+        if proc is not None:
+            def stop(force=False):
+                try:
+                    if os.name == "posix":
+                        # npm 的 Codex 命令会再启动 Rust 子进程，需回收本次创建的整组。
+                        os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+                    elif proc.poll() is None:
+                        (proc.kill if force else proc.terminate)()
+                except OSError:
+                    pass
+
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+            try:
+                proc.wait(timeout=0.3)
+            except subprocess.TimeoutExpired:
+                stop()
+                try:
+                    proc.wait(timeout=0.3)
+                except subprocess.TimeoutExpired:
+                    stop(force=True)
+                    proc.wait()
+            stop()
+            if reader is not None:
+                reader.join(timeout=0.3)
+                if reader.is_alive():
+                    stop(force=True)
+                    reader.join(timeout=0.3)
+            # 不与仍在 read 的线程竞争管道锁，否则失控的包装器子进程会拖过查询时限。
+            if proc.stdout is not None and (reader is None or not reader.is_alive()):
+                proc.stdout.close()
+
+
+def codex_models(path, cfg):
+    """模型目录来源单独标记；目录不代表当前账号或 API Key 已获全部调用权限。"""
+    models = _codex_app_server_models(path, cfg)
+    if models is not None:
+        return {"models": models, "models_source": "app_server", "models_message":
+                "已从 Codex model/list 读取 %d 个模型。" % len(models)}
+
+    home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    top = re.split(r"^\s*\[", _read_text(os.path.join(home, "config.toml")), maxsplit=1, flags=re.M)[0]
+    provider = re.search(r'^\s*model_provider\s*=\s*["\']([^"\']+)["\']', top, flags=re.M)
+    # OpenAI 缓存不适用于自定义 provider；手填的模型名仍照常提交。
+    overrides = re.search(r"^\s*(?:profile|model_catalog_json)\s*=", top, flags=re.M)
+    provider_set = re.search(r"^\s*model_provider\s*=", top, flags=re.M)
+    if not overrides and (not provider_set or (provider and provider.group(1) == "openai")):
+        try:
+            cache = json.loads(_read_text(os.path.join(home, "models_cache.json")) or "{}")
+            if isinstance(cache, dict):
+                models = _codex_model_items(cache.get("models"), cached=True,
+                                            api_key=cfg.get("codex_source") == "api_key")
+                if models:
+                    fetched = cache.get("fetched_at")
+                    return {"models": models, "models_source": "cache",
+                            "models_fetched_at": fetched[:80] if isinstance(fetched, str) else "",
+                            "models_message": "实时检索未完成，显示 Codex 本机缓存中的 %d 个模型。" % len(models)}
+        except (OSError, ValueError):
+            pass
+    return {"models": [], "models_source": "unavailable", "models_message":
+            "暂时没有读到模型目录。可点“重新检测”，或选“其他”填写模型名。"}
+
+
 def pi_dir():
     return os.environ.get("PI_CODING_AGENT_DIR") or os.path.expanduser("~/.pi/agent")
 
@@ -260,6 +426,7 @@ def detect(cfg):
         first = text.strip().splitlines()[0] if text.strip() else ""
         info["message"] = ("已登录：%s" % first) if code == 0 else "已安装，但没有登录（也可以改用 OpenAI API Key）。"
         info["default_model"] = codex_default_model()
+        info.update(codex_models(x, cfg))
         out["codex"] = info
     p = _which(cfg.get("pi_path") or "pi")
     if not p:

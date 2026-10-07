@@ -25,6 +25,8 @@
 
 API Key 保存在 macOS 钥匙串（其他系统保存在 `~/.config/product-factory/secrets.json`，权限 600），不会写进项目文件，也不会回传到网页。运行时只通过环境变量交给对应的命令行工具。“保存并测试连接”会实际调用一次模型，确认 Key、地址和模型名都可用。
 
+Codex 模型下拉优先读取官方 `codex app-server` 的 `model/list`，点击“重新检测”会重新读取目录，不创建对话或执行模型推理。查询沿用本机 Codex 登录与配置，不用工厂保存的 API Key 发起登录。读取失败时可显示 `CODEX_HOME`（默认 `~/.codex`）下 `models_cache.json` 的可显示模型，并标明缓存来源与时间；自定义 Codex provider、默认 profile 或自定义目录配置不回退到 OpenAI 缓存。目录可能来自 Codex 内置目录，不保证当前账号或 API Key 的调用权限，仍可选“默认”或“其他（手动填写）”。详见 [模型列表协议](https://developers.openai.com/codex/app-server#list-models-modellist)和 [目录与访问权限的区别](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)。
+
 首页的“先看看演示产品”始终使用演示模式，不受设置影响。
 
 ## 一个产品的界面

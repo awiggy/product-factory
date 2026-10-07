@@ -65,7 +65,7 @@ class Run:
 
     def meta(self, with_activity=True, since=0):
         m = {"id": self.id, "stage": self.stage, "mode": self.mode, "executor": self.executor,
-             "status": self.status, "started": self.started, "ended": self.ended,
+             "status": self.status, "started": self.started, "started_ts": self.started_ts, "ended": self.ended,
              "cost_usd": self.cost_usd, "tokens": self.tokens, "cost_note": self.cost_note,
              "executor_label": self.executor_label, "session_id": self.session_id, "error": self.error,
              "notes": self.notes}
@@ -295,6 +295,62 @@ def _run_codex(run, cfg):
         raise RuntimeError(msg)
 
 
+def _run_pi(run, cfg):
+    sessions = ib.read_json(_sessions_path(run.pdir), {}) or {}
+    key = "pi:" + run.stage
+    sid = sessions.get(key) if run.mode != "start" else None
+    for attempt in (1, 2):
+        cmd = ex.pi_command(cfg, run.stage, run.mode, run.prompt, sid)
+        run.emit("info", "启动 pi" + ("（接着上次的对话）" if sid else ""))
+        try:
+            run.proc = subprocess.Popen(cmd, cwd=run.pdir, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, text=True, bufsize=1, start_new_session=True,
+                                        env=ex.run_env(cfg))
+        except FileNotFoundError:
+            raise RuntimeError("找不到 pi（%s）。到“设置”里检测，或换一种执行方式。" % cmd[0])
+        stderr_lines = []
+        t = threading.Thread(target=lambda: stderr_lines.extend(run.proc.stderr.readlines()), daemon=True)
+        t.start()
+        outcome = None
+        raw_path = os.path.join(pr.runs_dir(run.pdir), run.id + ".jsonl")
+        os.makedirs(os.path.dirname(raw_path), exist_ok=True)
+        with open(raw_path, "a", encoding="utf-8") as raw:
+            for line in run.proc.stdout:
+                raw.write(line)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    evt = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                r = ex.pi_event(evt, run)
+                if r:
+                    outcome = r
+        run.proc.wait()
+        t.join(timeout=2)
+        for stream in (run.proc.stdout, run.proc.stderr):
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if run.stop_requested:
+            return
+        err_text = "".join(stderr_lines).strip()
+        if sid and attempt == 1 and run.proc.returncode != 0 and "session" in err_text.lower():
+            run.emit("info", "上次的对话已不可用，改为新开对话")
+            sid = None
+            continue
+        if run.session_id:
+            sessions[key] = run.session_id
+            ib.write_json(_sessions_path(run.pdir), sessions)
+        if run.proc.returncode != 0 or outcome is None or not outcome[1]:
+            msg = (outcome[2] if outcome and not outcome[1] else "") or err_text[-600:] \
+                or "pi 退出码 %s" % run.proc.returncode
+            raise RuntimeError(msg)
+        return
+
+
 # ------------------------------------------------------------------ 运行生命周期
 
 def active(pid):
@@ -325,7 +381,7 @@ def start(pid, mode="continue"):
         if mode == "deploy" and not gate.has_approval(state, "release_go"):
             raise pr.UserError("还没有授权部署。", 403)
         executor = "demo" if item.get("demo") else cfg.get("executor", "demo")
-        if executor in ("claude", "codex"):
+        if executor in ex.AUTO_EXECUTORS:
             prob = ex.ready_problem(cfg)
             if prob:
                 raise pr.UserError(prob)
@@ -333,6 +389,8 @@ def start(pid, mode="continue"):
         run.executor_label = "演示模式" if executor == "demo" else ex.label(cfg)
         if executor == "claude" and cfg.get("claude_source") == "provider":
             run.cost_note = "第三方模型的费用以厂商账单为准"
+        if executor == "pi":
+            run.cost_note = "pi 的费用以订阅或厂商账单为准"
         _active[pid] = run
     try:
         run.prompt = build_prompt(pdir, stage, mode)
@@ -353,7 +411,7 @@ def start(pid, mode="continue"):
         run.save()
         return run.meta()
     threading.Thread(target=_worker, args=(run, cfg), daemon=True).start()
-    if executor in ("claude", "codex"):
+    if executor in ex.AUTO_EXECUTORS:
         threading.Thread(target=_watchdog, args=(run, float(cfg.get("max_minutes_per_run") or 45)), daemon=True).start()
     run.save()
     return run.meta()
@@ -392,6 +450,8 @@ def _worker(run, cfg):
             _run_claude(run, cfg)
         elif run.executor == "codex":
             _run_codex(run, cfg)
+        elif run.executor == "pi":
+            _run_pi(run, cfg)
         else:
             from . import demo
             demo.run(run)

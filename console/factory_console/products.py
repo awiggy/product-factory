@@ -18,7 +18,7 @@ _cfg_lock = threading.Lock()
 
 DEFAULT_CONFIG = {
     "user_name": "",
-    "executor": "demo",          # demo | claude | codex | manual
+    "executor": "demo",          # demo | claude | codex | pi | manual
     "claude_path": "claude",
     "model": "",
     "claude_source": "account",  # account（Claude 账号）| provider（第三方兼容 API）
@@ -29,6 +29,9 @@ DEFAULT_CONFIG = {
     "codex_path": "codex",
     "codex_source": "account",   # account（ChatGPT 登录）| api_key（OpenAI API Key）
     "codex_model": "",
+    "pi_path": "pi",
+    "pi_model": "",              # provider/model，留空用 pi 自己的默认
+    "pi_thinking": "",           # 留空用默认；off | minimal | low | medium | high | xhigh
     "budget_per_run_usd": 3.0,
     "max_minutes_per_run": 45,
     "allow_shell_in_build": True,
@@ -69,18 +72,23 @@ def update_config(changes):
     allowed = {"user_name", "executor", "claude_path", "model", "budget_per_run_usd",
                "max_minutes_per_run", "allow_shell_in_build", "workspace", "claude_source", "provider_id",
                "provider_base_url", "provider_model", "provider_small_model", "codex_path", "codex_source",
-               "codex_model"}
+               "codex_model", "pi_path", "pi_model", "pi_thinking"}
     for k, v in changes.items():
         if k not in allowed:
             continue
         if isinstance(v, str):
             v = v.strip()
-        if k == "executor" and v not in ("demo", "claude", "codex", "manual"):
+        if k == "executor" and v not in ("demo", "claude", "codex", "pi", "manual"):
             raise UserError("执行方式无效")
         if k == "claude_source" and v not in ("account", "provider"):
             raise UserError("Claude Code 的模型来源无效")
         if k == "codex_source" and v not in ("account", "api_key"):
             raise UserError("Codex 的登录方式无效")
+        if k == "pi_thinking" and v not in ("", "off", "minimal", "low", "medium", "high", "xhigh"):
+            raise UserError("思考强度无效")
+        if k in ("model", "codex_model", "pi_model", "provider_model", "provider_small_model") and v \
+                and not re.match(r"^[A-Za-z0-9._:/\[\]@+-]{1,120}$", v):
+            raise UserError("模型名只能包含字母、数字和 . _ - / : 等符号")
         if k == "provider_base_url" and v and not re.match(r"^https://[^\s]+$", v):
             raise UserError("接口地址需要以 https:// 开头")
         if k in ("budget_per_run_usd", "max_minutes_per_run"):
@@ -443,7 +451,7 @@ def list_runs(pdir, limit=10):
                 m.pop("activity", None)
                 m.pop("prompt", None)
                 metas.append(m)
-    metas.sort(key=lambda m: m.get("started", ""), reverse=True)
+    metas.sort(key=lambda m: (m.get("started_ts") or 0, m.get("started", ""), m.get("id", "")), reverse=True)
     return metas[:limit]
 
 

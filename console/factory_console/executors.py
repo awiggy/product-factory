@@ -1,13 +1,17 @@
-"""AI 执行器：Claude Code（官方账号或第三方兼容 API）、Codex（ChatGPT 账号或 OpenAI API Key）。
+"""AI 执行器：Claude Code（官方账号或第三方兼容 API）、Codex（ChatGPT 账号或 OpenAI API Key）、pi。
 
-负责：检测安装与登录、按阶段权限拼命令、注入凭据环境变量、把事件流翻译成界面上的进度。
+负责：扫描本机 AI 命令行工具、检测安装与登录、列出可选模型、按阶段权限拼命令、
+注入凭据环境变量、把事件流翻译成界面上的进度。
 """
 
+import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 from . import SKILLS_ROOT
 from . import gate
@@ -33,6 +37,44 @@ PROVIDERS = [
 ]
 PROVIDER_IDS = {p["id"] for p in PROVIDERS}
 
+# 能自动执行的执行器（其余是 demo 与 manual）
+AUTO_EXECUTORS = ("claude", "codex", "pi")
+
+# Claude Code 可选模型。别名始终指向该系列的最新版本；固定版本不会自动升级。
+CLAUDE_MODELS = [
+    {"value": "opus", "label": "opus（最新 Opus，能力最强）"},
+    {"value": "sonnet", "label": "sonnet（最新 Sonnet，均衡）"},
+    {"value": "haiku", "label": "haiku（最新 Haiku，最快最省）"},
+    {"value": "opusplan", "label": "opusplan（规划用 Opus，执行用 Sonnet）"},
+    {"value": "claude-fable-5-1", "label": "claude-fable-5-1（固定版本，需账号开通）"},
+    {"value": "claude-opus-5-5", "label": "claude-opus-5-5（固定版本）"},
+    {"value": "claude-sonnet-5-5", "label": "claude-sonnet-5-5（固定版本）"},
+    {"value": "claude-haiku-4-5-20251001", "label": "claude-haiku-4-5（固定版本）"},
+]
+
+PI_THINKING = ["off", "minimal", "low", "medium", "high", "xhigh"]
+
+# 本机扫描的 AI 命令行工具。supported=True 的可以在控制台里全自动执行；其余可用“复制指令”方式。
+KNOWN_CLIS = [
+    {"id": "claude", "cmd": "claude", "name": "Claude Code", "supported": True},
+    {"id": "codex", "cmd": "codex", "name": "Codex CLI", "supported": True},
+    {"id": "pi", "cmd": "pi", "name": "pi coding agent", "supported": True},
+    {"id": "gemini", "cmd": "gemini", "name": "Gemini CLI"},
+    {"id": "qwen", "cmd": "qwen", "name": "Qwen Code"},
+    {"id": "opencode", "cmd": "opencode", "name": "OpenCode"},
+    {"id": "cursor-agent", "cmd": "cursor-agent", "name": "Cursor CLI"},
+    {"id": "copilot", "cmd": "copilot", "name": "GitHub Copilot CLI"},
+    {"id": "aider", "cmd": "aider", "name": "Aider"},
+    {"id": "goose", "cmd": "goose", "name": "Goose"},
+    {"id": "kimi", "cmd": "kimi", "name": "Kimi CLI"},
+    {"id": "iflow", "cmd": "iflow", "name": "iFlow CLI"},
+    {"id": "codebuddy", "cmd": "codebuddy", "name": "CodeBuddy Code"},
+    {"id": "crush", "cmd": "crush", "name": "Crush"},
+    {"id": "amp", "cmd": "amp", "name": "Amp"},
+    {"id": "droid", "cmd": "droid", "name": "Factory Droid"},
+    {"id": "kiro-cli", "cmd": "kiro-cli", "name": "Kiro CLI"},
+]
+
 DENY_ALWAYS = ["Edit(./factory/state.json)", "Write(./factory/state.json)", "Bash(sudo *)", "Bash(git push *)",
                "Bash(rm -rf /*)", "Bash(rm -rf ~*)"]
 
@@ -55,18 +97,132 @@ def label(cfg):
         return "Claude Code"
     if ex == "codex":
         return "Codex" + (" + OpenAI API Key" if cfg.get("codex_source") == "api_key" else "")
+    if ex == "pi":
+        return "pi" + ((" + " + cfg["pi_model"]) if cfg.get("pi_model") else "")
     return {"demo": "演示模式", "manual": "复制指令"}.get(ex, ex)
 
 
 # ------------------------------------------------------------------ 检测
 
+def _extra_dirs():
+    """双击启动时 PATH 可能不完整（比如 nvm、bun 装的命令），补上常见的安装位置。"""
+    h = os.path.expanduser("~")
+    dirs = ["/opt/homebrew/bin", "/usr/local/bin", h + "/.local/bin", h + "/.npm-global/bin", h + "/.bun/bin",
+            h + "/.volta/bin", h + "/.cargo/bin", h + "/Library/pnpm", h + "/.local/share/pnpm",
+            h + "/.claude/local", h + "/.deno/bin", h + "/bin"]
+    dirs += sorted(glob.glob(h + "/.nvm/versions/node/*/bin"), reverse=True)
+    dirs += sorted(glob.glob(h + "/.fnm/node-versions/*/installation/bin"), reverse=True)
+    return dirs
+
+
+def search_path():
+    seen, out = set(), []
+    for d in (os.environ.get("PATH", "").split(os.pathsep) + _extra_dirs()):
+        if d and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return os.pathsep.join(out)
+
+
 def _which(path):
     if not path:
         return None
-    found = shutil.which(path)
-    if found:
-        return found
-    return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+    if os.sep in path:
+        return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+    return shutil.which(path, path=search_path())
+
+
+def _first_line(text):
+    for line in (text or "").strip().splitlines():
+        line = line.strip()
+        if line:
+            return line[:120]
+    return ""
+
+
+def scan_clis():
+    """扫描本机装了哪些 AI 命令行工具，并读取版本号。"""
+    found = [(c, _which(c["cmd"])) for c in KNOWN_CLIS]
+    found = [(c, p) for c, p in found if p]
+
+    def version(item):
+        c, p = item
+        code, text = _run([p, "--version"], timeout=8, env=_tool_env(p))
+        return {"id": c["id"], "name": c["name"], "cmd": c["cmd"], "path": p,
+                "supported": bool(c.get("supported")), "version": _first_line(text) if code == 0 else ""}
+
+    if not found:
+        return []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return list(pool.map(version, found))
+
+
+def _tool_env(path, base=None):
+    """让命令能找到同目录下的 node 等运行时。"""
+    env = dict(base if base is not None else os.environ)
+    d = os.path.dirname(path or "")
+    env["PATH"] = os.pathsep.join([x for x in [d, search_path()] if x])
+    return env
+
+
+# ------------------------------------------------------------------ 各工具自己的默认模型
+
+def _read_text(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def claude_default_model():
+    for p in [os.path.expanduser("~/.claude/settings.json")]:
+        try:
+            m = (json.loads(_read_text(p) or "{}") or {}).get("model")
+        except ValueError:
+            m = None
+        if m:
+            return str(m)
+    return os.environ.get("ANTHROPIC_MODEL") or ""
+
+
+def codex_default_model():
+    home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    text = _read_text(os.path.join(home, "config.toml"))
+    # 只读顶层的 model（第一个 [表] 之前）
+    top = re.split(r"^\s*\[", text, maxsplit=1, flags=re.M)[0]
+    m = re.search(r'^\s*model\s*=\s*["\']([^"\']+)["\']', top, flags=re.M)
+    return m.group(1) if m else ""
+
+
+def pi_dir():
+    return os.environ.get("PI_CODING_AGENT_DIR") or os.path.expanduser("~/.pi/agent")
+
+
+def pi_default_model():
+    try:
+        s = json.loads(_read_text(os.path.join(pi_dir(), "settings.json")) or "{}") or {}
+    except ValueError:
+        return ""
+    if s.get("defaultModel"):
+        return ("%s/%s" % (s["defaultProvider"], s["defaultModel"])) if s.get("defaultProvider") else s["defaultModel"]
+    return ""
+
+
+def pi_models(path):
+    """pi --list-models 只列出已登录或已配置 Key 的模型。返回 [{provider, id, value}]。"""
+    code, text = _run([path, "--list-models"], timeout=30, env=pi_env({}, path))
+    if code != 0:
+        return None
+    out = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or parts[0] == "provider" or parts[0].startswith(("Warning", "No")):
+            continue
+        if not re.match(r"^[A-Za-z0-9._-]+$", parts[0]):
+            continue
+        out.append({"provider": parts[0], "id": parts[1], "value": "%s/%s" % (parts[0], parts[1])})
+    return out
 
 
 def _run(cmd, timeout=20, env=None, cwd=None):
@@ -91,6 +247,7 @@ def detect(cfg):
         code, text = _run([c, "auth", "status"], timeout=15)
         info["logged_in"] = code == 0
         info["message"] = "已登录 Claude 账号。" if code == 0 else "已安装，但没有登录 Claude 账号（用第三方 API 时不需要登录）。"
+        info["default_model"] = claude_default_model()
         out["claude"] = info
     x = _which(cfg.get("codex_path") or "codex")
     if not x:
@@ -102,7 +259,25 @@ def detect(cfg):
         info["logged_in"] = code == 0
         first = text.strip().splitlines()[0] if text.strip() else ""
         info["message"] = ("已登录：%s" % first) if code == 0 else "已安装，但没有登录（也可以改用 OpenAI API Key）。"
+        info["default_model"] = codex_default_model()
         out["codex"] = info
+    p = _which(cfg.get("pi_path") or "pi")
+    if not p:
+        out["pi"] = {"found": False, "message": "没有安装。安装：npm install -g @mariozechner/pi-coding-agent"}
+    else:
+        code, text = _run([p, "--version"], timeout=15, env=pi_env({}, p))
+        info = {"found": True, "path": p, "version": _first_line(text)}
+        models = pi_models(p)
+        info["models"] = models or []
+        info["logged_in"] = bool(models)
+        info["default_model"] = pi_default_model()
+        if models is None:
+            info["message"] = "已安装，但读取模型列表失败。"
+        elif not models:
+            info["message"] = "已安装，但还没有可用的模型：在终端运行 pi，输入 /login 登录，或配置厂商的 API Key。"
+        else:
+            info["message"] = "可用模型 %d 个。" % len(models)
+        out["pi"] = info
     return out
 
 
@@ -122,6 +297,9 @@ def ready_problem(cfg):
             return "没有找到 Codex。到“设置”里检测，或换一种执行方式。"
         if cfg.get("codex_source") == "api_key" and not secrets.get_secret(OPENAI_ACCOUNT):
             return "还没有保存 OpenAI API Key。"
+    if ex == "pi":
+        if not _which(cfg.get("pi_path") or "pi"):
+            return "没有找到 pi。到“设置”里检测，或换一种执行方式。"
     return None
 
 
@@ -135,6 +313,11 @@ _CRED_VARS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
 def run_env(cfg):
     env = {k: v for k, v in os.environ.items() if k not in _CRED_VARS}
     ex = cfg.get("executor")
+    if ex in AUTO_EXECUTORS:
+        tool = _which(cfg.get(ex + "_path") or ex) or ""
+        env = _tool_env(tool, env)
+    if ex == "pi":
+        env = pi_env(env)
     if ex == "claude" and cfg.get("claude_source") == "provider":
         key = secrets.get_secret(provider_account(cfg.get("provider_id") or "custom"))
         model = cfg.get("provider_model", "")
@@ -268,6 +451,93 @@ def codex_event(ev, run):
     return None
 
 
+# ------------------------------------------------------------------ pi
+
+def pi_env(env, path=None):
+    env = dict(env) if env else {k: v for k, v in os.environ.items() if k not in _CRED_VARS}
+    if path:
+        env = _tool_env(path, env)
+    env.update({"PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"})
+    return env
+
+
+PI_READ_TOOLS = "read,write,edit,grep,find,ls"
+
+
+def pi_command(cfg, stage, mode, prompt, session_id=None):
+    """pi 没有沙箱，只能用工具白名单控制：需求、架构、选型阶段不给 bash。"""
+    _, _, defs = gate.stage_config()
+    profile = "P3" if mode == "deploy" else defs[stage]["permission_profile"]
+    tools = PI_READ_TOOLS
+    if profile == "P3" or (profile in ("P1", "P2") and cfg.get("allow_shell_in_build", True)):
+        tools += ",bash"
+    cmd = [cfg.get("pi_path") or "pi", "--mode", "json", "--tools", tools, "--skill", SKILLS_ROOT]
+    if cfg.get("pi_model"):
+        cmd += ["--model", cfg["pi_model"]]
+    if cfg.get("pi_thinking") in PI_THINKING:
+        cmd += ["--thinking", cfg["pi_thinking"]]
+    if session_id:
+        cmd += ["--session", session_id]
+    cmd += [prompt]
+    return cmd
+
+
+def pi_tool_text(name, args):
+    args = args or {}
+    fp = args.get("path") or args.get("file_path") or ""
+    if name == "read":
+        return "读取 " + os.path.basename(fp)
+    if name == "write":
+        return "写入 " + fp
+    if name == "edit":
+        return "修改 " + fp
+    if name == "bash":
+        cmd = str(args.get("command") or "").strip().replace("\n", " ")
+        return "运行命令：" + cmd[:90] + ("…" if len(cmd) > 90 else "")
+    if name in ("grep", "find", "ls"):
+        return "查找文件"
+    return "使用工具 " + name
+
+
+def pi_event(ev, run):
+    """翻译 pi --mode json 的一条事件。pi 在模型报错时退出码仍为 0，所以要记下最后一条助手消息的状态。
+    返回 ('result', ok, message) 或 None。"""
+    typ = ev.get("type")
+    if typ == "session":
+        run.session_id = ev.get("id") or run.session_id
+        return None
+    if typ == "tool_execution_start":
+        run.emit("tool", pi_tool_text(ev.get("toolName", ""), ev.get("args")))
+        return None
+    if typ == "tool_execution_end" and ev.get("isError"):
+        run.emit("warn", "%s 执行出错" % ev.get("toolName", "工具"))
+        return None
+    if typ == "auto_retry_start":
+        run.emit("warn", "模型服务暂时不可用，正在重试（第 %s 次）" % ev.get("attempt"))
+        return None
+    if typ == "message_end":
+        m = ev.get("message") or {}
+        if m.get("role") != "assistant":
+            return None
+        if not getattr(run, "model_announced", False) and m.get("model"):
+            run.model_announced = True
+            run.emit("info", "模型：%s/%s" % (m.get("provider", ""), m.get("model")))
+        for block in m.get("content") or []:
+            if block.get("type") == "text" and str(block.get("text", "")).strip():
+                txt = block["text"].strip().replace("\n", " ")
+                run.emit("text", txt[:200] + ("…" if len(txt) > 200 else ""))
+        u = m.get("usage") or {}
+        if u:
+            tok = run.tokens or {"input": 0, "output": 0}
+            tok["input"] += int(u.get("input") or 0) + int(u.get("cacheRead") or 0)
+            tok["output"] += int(u.get("output") or 0)
+            run.tokens = tok
+        if m.get("stopReason") in ("error", "aborted"):
+            return ("result", False, str(m.get("errorMessage") or "模型调用失败"))
+        return ("result", True, "")
+    return None
+
+
 # ------------------------------------------------------------------ 连接测试
 
 def test_connection(cfg):
@@ -315,6 +585,26 @@ def test_connection(cfg):
             if code == 0 and not failed:
                 return {"ok": True, "message": "连接成功，模型回复：%s" % msg.strip()[:40]}
             return {"ok": False, "message": "连接失败：%s" % (failed or text.strip()[:300])}
+        if ex == "pi":
+            cmd = [cfg.get("pi_path") or "pi", "--mode", "json", "--no-tools", "--no-session", "--no-skills"]
+            if cfg.get("pi_model"):
+                cmd += ["--model", cfg["pi_model"]]
+            cmd += ["只回复两个字母：OK"]
+            code, text = _run(cmd, timeout=120, env=env, cwd=tmp)
+            last = None
+            for line in text.splitlines():
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if ev.get("type") == "message_end" and (ev.get("message") or {}).get("role") == "assistant":
+                    last = ev["message"]
+            if code == 0 and last and last.get("stopReason") not in ("error", "aborted"):
+                reply = "".join(b.get("text", "") for b in last.get("content") or [] if b.get("type") == "text")
+                return {"ok": True, "message": "连接成功（%s/%s），模型回复：%s" % (
+                    last.get("provider", ""), last.get("model", ""), reply.strip()[:40])}
+            err = (last or {}).get("errorMessage") or _first_line(text) or "pi 退出码 %s" % code
+            return {"ok": False, "message": "连接失败：%s" % str(err)[:300]}
         return {"ok": True, "message": "这种方式不需要测试连接。"}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

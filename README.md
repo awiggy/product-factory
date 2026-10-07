@@ -18,7 +18,7 @@
 
 ## 开始使用控制台
 
-双击 `启动控制台.command`（或运行 `python3 console/server.py`），浏览器会打开控制台。先点“先看看演示产品”走一遍完整流程（不调用 AI），再到“设置”里选择 AI 执行方式：Claude Code 或 Codex，可以用各自的账号，也可以填 DeepSeek、Kimi 等国内模型的 API Key。详见 [控制台说明](console/README.md)。
+双击 `启动控制台.command`（或运行 `python3 console/server.py`），浏览器会打开控制台。先点“先看看演示产品”走一遍完整流程（不调用 AI），再到“设置”里选择 AI 执行方式：Claude Code、Codex 或 pi，可以用各自的账号，也可以填 DeepSeek、Kimi 等国内模型的 API Key。详见 [控制台说明](console/README.md)。
 
 ## 7 个 Skill
 

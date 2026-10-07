@@ -71,9 +71,10 @@ def _secret_account(body):
 def executors(h, q, body):
     cfg = pr.load_config()
     keys = {p["id"]: secrets.masked(ex.provider_account(p["id"])) for p in ex.PROVIDERS}
-    return {"detected": ex.detect(cfg), "providers": ex.PROVIDERS, "provider_keys": keys,
+    return {"detected": ex.detect(cfg), "clis": ex.scan_clis(), "claude_models": ex.CLAUDE_MODELS,
+            "pi_thinking": ex.PI_THINKING, "providers": ex.PROVIDERS, "provider_keys": keys,
             "openai_key": secrets.masked(ex.OPENAI_ACCOUNT), "secret_store": secrets.where(),
-            "ready_problem": ex.ready_problem(cfg) if cfg.get("executor") in ("claude", "codex") else None}
+            "ready_problem": ex.ready_problem(cfg) if cfg.get("executor") in ex.AUTO_EXECUTORS else None}
 
 
 @route("POST", r"/api/secrets")

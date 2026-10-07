@@ -206,6 +206,85 @@ class ClaudeExecutorTest(Base):
                     self.assertNotIn(b"sk-test-1234567890", f.read())
         self.assertTrue(executors.test_connection(pr.load_config())["ok"])
 
+    def test_pi(self):
+        fake = self.wrapper("pi", "fake_pi.py")
+        logf = os.path.join(self.tmp, "pi.log")
+        os.environ["FAKE_PI_LOG"] = logf
+        pr.update_config({"executor": "pi", "pi_path": fake, "pi_model": "deepseek/deepseek-v4-pro",
+                          "pi_thinking": "high"})
+        info = executors.detect(pr.load_config())["pi"]
+        self.assertTrue(info["found"] and info["logged_in"])
+        self.assertEqual([m["value"] for m in info["models"]],
+                         ["anthropic/claude-sonnet-5-5", "deepseek/deepseek-v4-pro"])
+        self.assertEqual(executors.label(pr.load_config()), "pi + deepseek/deepseek-v4-pro")
+        with self.assertRaises(pr.UserError):
+            pr.update_config({"pi_model": "bad model; rm -rf"})
+        with self.assertRaises(pr.UserError):
+            pr.update_config({"pi_thinking": "max"})
+
+        pid = pr.create_product("pi 产品", "一个想法")
+        d = self.run_and_wait(pid, "start")
+        run = d["runs"][0]
+        self.assertEqual(run["status"], "succeeded", run.get("error"))
+        self.assertEqual(run["tokens"], {"input": 250, "output": 25})
+        self.assertEqual(d["next_action"]["kind"], "answer")
+        with open(logf, encoding="utf-8") as f:
+            calls = [json.loads(x) for x in f]
+        a = calls[-1]["args"]
+        self.assertFalse(calls[-1]["stdin_tty"])
+        self.assertEqual(a[a.index("--tools") + 1], "read,write,edit,grep,find,ls")   # 需求阶段不给 bash
+        self.assertEqual(a[a.index("--model") + 1], "deepseek/deepseek-v4-pro")
+        self.assertEqual(a[a.index("--thinking") + 1], "high")
+        self.assertIn("--skill", a)
+        self.assertNotIn("--session", a)
+
+        pr.save_answers(pid, {"q1": "研究生"})
+        d = self.run_and_wait(pid, "continue")
+        with open(logf, encoding="utf-8") as f:
+            a = json.loads(f.read().splitlines()[-1])["args"]
+        self.assertEqual(a[a.index("--session") + 1], "pi-session-1")              # 接着上次的对话
+
+        os.environ["FAKE_PI_ERROR"] = "1"
+        try:
+            d = self.run_and_wait(pid, "continue")
+        finally:
+            os.environ.pop("FAKE_PI_ERROR")
+        self.assertEqual(d["runs"][0]["status"], "failed")
+        self.assertIn("Connection error", d["runs"][0]["error"])                    # 退出码 0 也要判为失败
+
+        self.assertTrue(executors.test_connection(pr.load_config())["ok"])
+        os.environ["FAKE_PI_NO_MODELS"] = "1"
+        try:
+            info = executors.detect(pr.load_config())["pi"]
+        finally:
+            os.environ.pop("FAKE_PI_NO_MODELS")
+            os.environ.pop("FAKE_PI_LOG")
+        self.assertFalse(info["logged_in"])
+
+    def test_scan_and_defaults(self):
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir)
+        for name, script in (("pi", "fake_pi.py"), ("codex", "fake_codex.py")):
+            p = os.path.join(bindir, name)
+            with open(p, "w") as f:
+                f.write('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, os.path.join(HERE, script)))
+            os.chmod(p, 0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + old
+        home = os.path.join(self.tmp, "codexhome")
+        os.makedirs(home)
+        with open(os.path.join(home, "config.toml"), "w") as f:
+            f.write('model = "gpt-test"\n[profiles.fast]\nmodel = "other"\n')
+        os.environ["CODEX_HOME"] = home
+        try:
+            found = {c["id"]: c for c in executors.scan_clis()}
+            self.assertEqual(found["pi"]["version"], "0.73.1")
+            self.assertTrue(found["pi"]["supported"])
+            self.assertEqual(executors.codex_default_model(), "gpt-test")
+        finally:
+            os.environ["PATH"] = old
+            os.environ.pop("CODEX_HOME")
+
     def test_codex(self):
         fake = self.wrapper("codex", "fake_codex.py")
         logf = os.path.join(self.tmp, "codex.log")

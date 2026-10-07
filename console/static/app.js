@@ -635,7 +635,7 @@ async function renderSettings() {
         <label class="field"><span>单次运行最长时间（分钟）</span><input type="number" min="5" name="max_minutes_per_run" value="${esc(String(c.max_minutes_per_run))}"></label>
       </div>
       <label class="ack"><input type="checkbox" name="allow_shell_in_build" ${c.allow_shell_in_build ? "checked" : ""}>
-        <span>开发、前端、评测阶段允许 AI 在产品文件夹里运行命令（装依赖、跑测试）。仅对 Claude Code 生效；Codex 始终在沙箱里运行命令。</span></label>
+        <span>开发、前端、评测阶段允许 AI 在产品文件夹里运行命令（装依赖、跑测试）。对 Claude Code 和 pi 生效；Codex 始终在沙箱里运行命令。</span></label>
       <p class="hint">无论怎么设置：AI 不能修改工厂状态、不能替你签字；部署只能在你授权后进行。</p>
     </section>
     <section class="sheet"><h2>产品存放位置</h2><input type="text" name="workspace" value="${esc(c.workspace || "")}"></section>
@@ -647,6 +647,31 @@ async function renderSettings() {
   paintExecCards();
   try { App.execInfo = await get("/api/executors"); } catch (e) { toast(e.message, true); }
   paintExecCards();
+}
+
+// 模型下拉：已知选项 + “默认” + “其他（手动填写）”。真正提交的是同名文本框。
+function modelPicker(name, value, groups, defaultLabel) {
+  const flat = groups.flatMap((g) => g.items);
+  const known = !value || flat.some((o) => o.value === value);
+  const opt = (o) => `<option value="${esc(o.value)}" ${o.value === value ? "selected" : ""}>${esc(o.label || o.value)}</option>`;
+  const body = groups.map((g) => g.group ? `<optgroup label="${esc(g.group)}">${g.items.map(opt).join("")}</optgroup>` : g.items.map(opt).join("")).join("");
+  return `<div class="model-picker">
+    <select data-action-change="modelsel" data-target="${name}" aria-label="选择模型">
+      ${defaultLabel !== null ? `<option value="" ${!value ? "selected" : ""}>${esc(defaultLabel)}</option>` : ""}
+      ${body}
+      <option value="__custom__" ${known ? "" : "selected"}>其他（手动填写）</option>
+    </select>
+    <input type="text" name="${name}" value="${esc(value || "")}" placeholder="填写模型名" ${known ? "hidden" : ""}>
+  </div>`;
+}
+
+function cliList(info) {
+  if (!info) return "";
+  const clis = info.clis || [];
+  if (!clis.length) return `<p class="small muted">没有在这台电脑上找到 AI 命令行工具。</p>`;
+  return `<div class="cli-scan"><span class="small muted">本机检测到：</span>${clis.map((c) => `<span class="cli-chip ${c.supported ? "ok" : ""}" title="${esc(c.path)}">
+      <b>${esc(c.name)}</b>${c.version ? ` <span class="muted">${esc(c.version.replace(/^[^0-9]*/, "").split(" ")[0])}</span>` : ""}
+      <span class="tag">${c.supported ? "可全自动" : "可复制指令"}</span></span>`).join("")}</div>`;
 }
 
 function paintExecCards() {
@@ -673,14 +698,17 @@ function paintExecCards() {
         <span><b>国内或第三方模型 API</b><br><span class="small muted">DeepSeek、Kimi、智谱 GLM、MiniMax 等提供 Claude 兼容接口的厂商，填它们的 API Key 即可，不需要 Claude 账号。</span></span></label>
     </div>
     <div data-source="account" ${c.claude_source === "provider" ? "hidden" : ""}>
-      <label class="field"><span>模型（留空用默认）</span><input type="text" name="model" value="${esc(c.model || "")}" placeholder="比如 sonnet 或 opus"></label>
+      <div class="field"><span class="field-label">模型</span>
+        ${modelPicker("model", c.model, [{ items: (info && info.claude_models) || [] }],
+          det.claude && det.claude.default_model ? `默认（Claude Code 设置里的 ${det.claude.default_model}）` : "默认（跟随 Claude Code 的设置）")}
+        <div class="hint">opus、sonnet、haiku 这类别名始终指向最新版本；固定版本不会自动升级。</div></div>
     </div>
     <div data-source="provider" ${c.claude_source === "provider" ? "" : "hidden"}>
       <div class="grid-2">
         <label class="field"><span>厂商</span><select name="provider_id" data-action-change="provider">
           ${providers.map((p) => `<option value="${esc(p.id)}" ${p.id === c.provider_id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
-        <label class="field"><span>模型</span><input type="text" name="provider_model" list="provider-models" value="${esc(c.provider_model || "")}">
-          <datalist id="provider-models">${(pv.models || []).map((m) => `<option value="${esc(m)}">`).join("")}</datalist></label>
+        <div class="field"><span class="field-label">模型</span>
+          ${modelPicker("provider_model", c.provider_model, [{ items: (pv.models || []).map((m) => ({ value: m })) }], null)}</div>
       </div>
       <label class="field"><span>接口地址</span><input type="text" name="provider_base_url" value="${esc(c.provider_base_url || "")}" placeholder="https://…/anthropic"></label>
       <div class="field"><span class="field-label">API Key${pv.site ? `（在 <a href="${esc(pv.site)}" target="_blank" rel="noopener">${esc(pv.name)} 开放平台</a>创建）` : ""}</span>
@@ -699,17 +727,39 @@ function paintExecCards() {
         <span><b>OpenAI API Key</b><br><span class="small muted">按调用量付费，不需要 ChatGPT 账号。</span></span></label>
     </div>
     <div data-csource="api_key" ${c.codex_source === "api_key" ? "" : "hidden"}><div class="field">${keyRow("openai", info && info.openai_key)}</div></div>
-    <label class="field"><span>模型（留空用默认）</span><input type="text" name="codex_model" value="${esc(c.codex_model || "")}"></label>
+    <div class="field"><span class="field-label">模型</span>
+      ${modelPicker("codex_model", c.codex_model, [], det.codex && det.codex.default_model ? `默认（Codex 设置里的 ${det.codex.default_model}）` : "默认（跟随 Codex 的设置）")}
+      <div class="hint">Codex 不提供模型列表，需要别的模型时选“其他”手动填写。</div></div>
     <p class="hint">Codex 在沙箱里工作：只能改产品文件夹；开发、评测、上线阶段才允许联网。它不能按文件细分权限，所以需求和架构阶段也能改到代码文件，控制台会在每次运行后检查状态文件。</p>
     <details class="small"><summary class="muted" style="cursor:pointer">命令路径</summary>
       <label class="field" style="margin-top:8px"><span>Codex 命令</span><input type="text" name="codex_path" value="${esc(c.codex_path || "codex")}"></label></details>`;
+  const piModels = (det.pi && det.pi.models) || [];
+  const piGroups = [];
+  piModels.forEach((m) => {
+    let g = piGroups.find((x) => x.group === m.provider);
+    if (!g) piGroups.push(g = { group: m.provider, items: [] });
+    g.items.push({ value: m.value, label: m.id });
+  });
+  const piExtra = `
+    ${det.pi && det.pi.found && !piModels.length ? `<p class="small err">${esc(det.pi.message)}</p>` : ""}
+    <div class="grid-2">
+      <div class="field"><span class="field-label">模型${piModels.length ? `（${piModels.length} 个可用）` : ""}</span>
+        ${modelPicker("pi_model", c.pi_model, piGroups, det.pi && det.pi.default_model ? `默认（pi 设置里的 ${det.pi.default_model}）` : "默认（跟随 pi 的设置）")}</div>
+      <label class="field"><span>思考强度</span><select name="pi_thinking">
+        <option value="" ${!c.pi_thinking ? "selected" : ""}>默认</option>
+        ${((info && info.pi_thinking) || []).map((t) => `<option value="${t}" ${c.pi_thinking === t ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+    </div>
+    <p class="hint">列表来自 pi 里已登录的订阅和已配置的 API Key，在 pi 里登录新厂商后点“重新检测”即可刷新。pi 没有沙箱，控制台用工具白名单限制它：需求、架构、选型阶段不能运行命令；每次运行后照常检查状态文件。pi 没有单次预算上限，只有时长上限。</p>
+    <details class="small"><summary class="muted" style="cursor:pointer">命令路径</summary>
+      <label class="field" style="margin-top:8px"><span>pi 命令</span><input type="text" name="pi_path" value="${esc(c.pi_path || "pi")}"></label></details>`;
   const manualOpen = c.executor === "manual";
-  $("#exec-cards").innerHTML =
+  $("#exec-cards").innerHTML = cliList(info) +
     card("claude", "Claude Code", "全自动。可以用 Claude 账号，也可以用国内模型的 API Key。", claudeExtra, info ? statusPill(det.claude) : statusPill(null)) +
     card("codex", "Codex", "全自动。用 ChatGPT 账号或 OpenAI API Key。", codexExtra, info ? statusPill(det.codex) : statusPill(null)) +
+    card("pi", "pi", "全自动。用 pi 里已登录的订阅或已配置的 Key，可以选任意厂商的模型。", piExtra, info ? statusPill(det.pi) : statusPill(null)) +
     card("demo", "演示模式", "不调用 AI，用示例内容走完整流程，适合先熟悉界面。") +
     `<details class="exec-advanced" ${manualOpen ? "open" : ""}><summary>其他 AI 工具（不推荐）</summary>
-      <p class="small muted">电脑上没有 Claude Code 或 Codex、但有别的 AI 编程助手时用：控制台照常管理流程、问题、验收和审批，只是每一步需要你把指令复制给那个助手执行。</p>
+      <p class="small muted">电脑上没有 Claude Code、Codex 或 pi，只有别的 AI 编程助手（比如上面标着“可复制指令”的）时用：控制台照常管理流程、问题、验收和审批，只是每一步需要你把指令复制给那个助手执行。</p>
       ${card("manual", "复制指令给其他 AI 助手", "每一步手动复制粘贴，适合临时使用。")}</details>
     <div class="btn-row" style="margin-top:8px"><button type="button" class="btn btn-quiet small" data-action="redetect">重新检测</button>
       ${info && info.ready_problem ? `<span class="small err">${esc(info.ready_problem)}</span>` : ""}</div>`;
@@ -726,6 +776,7 @@ function readSettingsForm() {
     provider_model: v("provider_model"), provider_base_url: v("provider_base_url"),
     provider_small_model: v("provider_small_model"), claude_path: v("claude_path"),
     codex_source: r("codex_source"), codex_model: v("codex_model"), codex_path: v("codex_path"),
+    pi_model: v("pi_model"), pi_thinking: v("pi_thinking"), pi_path: v("pi_path"),
   };
   Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
   return body;
@@ -749,6 +800,11 @@ document.addEventListener("change", (e) => {
     f.querySelectorAll("[data-source]").forEach((d) => { d.hidden = d.dataset.source !== e.target.value; });
   } else if (kind === "csource") {
     f.querySelectorAll("[data-csource]").forEach((d) => { d.hidden = d.dataset.csource !== e.target.value; });
+  } else if (kind === "modelsel") {
+    const input = f.elements[e.target.dataset.target];
+    if (!input) return;
+    if (e.target.value === "__custom__") { input.hidden = false; input.value = ""; input.focus(); }
+    else { input.hidden = true; input.value = e.target.value; }
   } else if (kind === "provider") {
     const p = (App.execInfo.providers || []).find((x) => x.id === e.target.value);
     if (!p) return;

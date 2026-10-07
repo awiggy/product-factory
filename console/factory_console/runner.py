@@ -458,6 +458,7 @@ def _terminate(run):
 
 
 def _worker(run, cfg):
+    final = "failed"
     try:
         if run.executor == "claude":
             _run_claude(run, cfg)
@@ -469,19 +470,20 @@ def _worker(run, cfg):
             from . import demo
             demo.run(run)
         if run.stop_requested:
-            run.status = "stopped"
+            final = "stopped"
             run.emit("warn", "已停止")
         else:
-            run.status = "succeeded"
+            final = "succeeded"
     except Exception as e:  # noqa: BLE001
-        run.status = "failed"
+        final = "failed"
         run.error = str(e)
         run.emit("error", str(e))
     finally:
-        _finish(run)
+        # 先吸收结果、再改状态：否则页面会在状态文件更新前就看到“已完成”
+        _finish(run, final)
 
 
-def _finish(run):
+def _finish(run, final=None):
     with gate.lock_for(run.pdir):
         sp = gate.fg.state_path(run.pdir)
         try:
@@ -498,6 +500,8 @@ def _finish(run):
             run.notes += pr.ingest(run.pdir, run.stage, run.started_ts, deploy_mode=(run.mode == "deploy"))
         except Exception as e:  # noqa: BLE001
             run.notes.append("吸收结果时出错：%s" % e)
+        if final:
+            run.status = final
     run.ended = _now_iso()
     run.emit("done", {"succeeded": "本次运行完成", "failed": "本次运行失败", "stopped": "已停止"}.get(run.status, "结束"))
     run.save()
@@ -509,8 +513,7 @@ def stop(pid):
         raise pr.UserError("现在没有正在进行的任务。")
     if run.status == "waiting_manual":
         run.stop_requested = True
-        run.status = "stopped"
-        _finish(run)
+        _finish(run, "stopped")
         return
     run.emit("info", "正在停止…")
     threading.Thread(target=_terminate, args=(run,), daemon=True).start()
@@ -520,9 +523,8 @@ def manual_done(pid):
     run = active(pid)
     if not run or run.status != "waiting_manual":
         raise pr.UserError("没有等待中的手动任务。")
-    run.status = "succeeded"
     run.emit("info", "你确认 AI 助手已执行完毕")
-    _finish(run)
+    _finish(run, "succeeded")
     return run.meta()
 
 

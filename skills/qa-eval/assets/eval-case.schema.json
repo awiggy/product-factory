@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "factory eval case（cases.jsonl 每行一个）",
+  "type": "object",
+  "required": ["id", "ac", "type", "layer", "input", "expected", "judge", "result"],
+  "properties": {
+    "id": {"type": "string", "description": "唯一编号，如 TC-001"},
+    "ac": {"type": "array", "items": {"type": "string", "pattern": "^AC-[0-9]+$"}, "minItems": 1},
+    "type": {"enum": ["functional", "agent_quality", "safety", "reliability", "performance"]},
+    "layer": {"enum": ["mock", "real", "manual"]},
+    "title": {"type": "string"},
+    "input": {"description": "输入或操作步骤；不含真实用户隐私与密钥"},
+    "expected": {"description": "预期结果或通过标准"},
+    "judge": {"enum": ["exact", "rule", "rubric", "human", "model_judge", "measure"]},
+    "rubric": {"type": "string", "description": "judge 为 rubric/model_judge/human 时的评分标准或其位置"},
+    "result": {"enum": ["pass", "fail", "unverified", "n/a"]},
+    "severity": {"enum": ["blocker", "major", "minor"], "description": "result 为 fail 时必填"},
+    "evidence": {"type": "string", "description": "命令、日志或截图位置"},
+    "notes": {"type": "string"}
+  },
+  "additionalProperties": true
+}

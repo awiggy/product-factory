@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent 前端交互交付"
+  short_description: "完善任务状态、流式输出、人工确认与断线恢复，并验证多状态视觉体验"
+  default_prompt: "使用 $agent-frontend-delivery，完善当前 Agent 任务页面，核对状态契约并验证失败与恢复路径。"

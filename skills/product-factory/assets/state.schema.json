@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "factory/state.json",
+  "description": "产品工厂状态。由 factory_gate.py 读写与校验（脚本内置等价校验，不依赖第三方库）。",
+  "type": "object",
+  "required": ["schema_version", "product", "current_stage", "stages", "approvals", "waivers", "history"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "product": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string"},
+        "slug": {"type": "string"},
+        "version": {"type": "integer", "minimum": 1},
+        "created_at": {"type": "string"}
+      }
+    },
+    "current_stage": {"enum": ["prd", "blueprint", "adaptation", "build", "frontend", "qa", "release", "operate"]},
+    "stages": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status", "evidence", "blockers"],
+        "properties": {
+          "status": {"enum": ["not_started", "in_progress", "awaiting_approval", "passed", "blocked", "skipped"]},
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["level", "what", "how", "result", "at"],
+              "properties": {
+                "level": {"enum": ["planned", "scaffold_runs", "mock_passed", "real_passed", "production_verified"]},
+                "what": {"type": "string"},
+                "how": {"type": "string"},
+                "result": {"enum": ["pass", "fail", "unverified", "n/a"]},
+                "where": {"type": "string"},
+                "env": {"type": "string"},
+                "at": {"type": "string"},
+                "resolved": {"type": "object"}
+              }
+            }
+          },
+          "blockers": {"type": "array", "items": {"type": "string"}},
+          "approval_required": {"type": ["boolean", "null"]},
+          "skipped_reason": {"type": ["string", "null"]},
+          "notes": {"type": "string"}
+        }
+      }
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "stage", "by", "quote", "at"],
+        "properties": {
+          "id": {"type": "string"},
+          "stage": {"type": "string"},
+          "by": {"type": "string"},
+          "quote": {"type": "string", "description": "用户批准原话"},
+          "scope": {"type": "string"},
+          "at": {"type": "string"},
+          "product_version": {"type": "integer"}
+        }
+      }
+    },
+    "waivers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stage", "item", "reason", "by", "quote", "at"]
+      }
+    },
+    "budget": {"type": "object"},
+    "history": {"type": "array"}
+  }
+}

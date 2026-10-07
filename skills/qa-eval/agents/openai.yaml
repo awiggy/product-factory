@@ -1,0 +1,4 @@
+interface:
+  display_name: "QA 与效果评测"
+  short_description: "把 PRD 验收标准转成功能、效果、安全与可靠性用例，追踪覆盖并出评测报告"
+  default_prompt: "使用 $qa-eval，根据 PRD 的验收标准写评测计划与用例，检查覆盖，执行后给出评测报告与阻塞项。"

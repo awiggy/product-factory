@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent 架构蓝图"
+  short_description: "从点子与需求推导最小 Agent 架构，明确组件取舍、工具权限及验收方案"
+  default_prompt: "使用 $agent-blueprint，根据我的需求推导最小架构，明确组件与权限，目前只做方案、不生成代码或部署。"

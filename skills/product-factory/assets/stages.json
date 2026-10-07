@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "evidence_levels": ["planned", "scaffold_runs", "mock_passed", "real_passed", "production_verified"],
+  "evidence_level_notes": {
+    "planned": "方案或文档已写，未运行任何东西",
+    "scaffold_runs": "骨架可启动，核心逻辑未验证",
+    "mock_passed": "mock/离线自动化测试通过，未接真实模型或第三方",
+    "real_passed": "已授权的真实模型/第三方冒烟通过（本地或测试环境）",
+    "production_verified": "目标环境已部署，版本、核心业务、权限、持久数据经实际验证"
+  },
+  "stages": [
+    {
+      "id": "prd",
+      "title": "PRD",
+      "skill": "prd-author",
+      "permission_profile": "P0",
+      "artifacts": ["factory/prd.md"],
+      "min_evidence": "planned",
+      "approvals": [{"id": "prd_signoff", "when": "exit", "mode": "required", "ask": "PRD 的用户、核心闭环、范围、红线与验收标准是否确认？"}],
+      "skippable": false
+    },
+    {
+      "id": "blueprint",
+      "title": "架构蓝图",
+      "skill": "agent-blueprint",
+      "permission_profile": "P0",
+      "artifacts": ["factory/blueprint.md"],
+      "min_evidence": "planned",
+      "approvals": [{"id": "blueprint_signoff", "when": "exit", "mode": "required", "ask": "Agent/工作流判断、组件取舍、权限与预算边界是否确认？"}],
+      "skippable": false
+    },
+    {
+      "id": "adaptation",
+      "title": "技术适配与阶段计划",
+      "skill": "agent-mvp-delivery",
+      "permission_profile": "P0",
+      "artifacts": ["factory/adaptation.md", "factory/stages/plan.md"],
+      "min_evidence": "planned",
+      "approvals": [{"id": "adaptation_confirm", "when": "exit", "mode": "conditional", "ask": "偏离默认方案、新增费用/平台/数据外传或暂缓项是否接受？"}],
+      "skippable": false
+    },
+    {
+      "id": "build",
+      "title": "MVP 核心闭环",
+      "skill": "agent-mvp-delivery",
+      "permission_profile": "P2",
+      "artifacts": ["factory/stages/handoff.md"],
+      "min_evidence": "real_passed",
+      "approvals": [{"id": "build_acceptance", "when": "exit", "mode": "required", "ask": "按验收清单亲自操作后，本阶段核心闭环是否通过？"}],
+      "skippable": false
+    },
+    {
+      "id": "frontend",
+      "title": "正式前端",
+      "skill": "agent-frontend-delivery",
+      "permission_profile": "P2",
+      "artifacts": ["factory/frontend/adaptation.md", "factory/frontend/ui-acceptance.md"],
+      "min_evidence": "real_passed",
+      "approvals": [{"id": "frontend_acceptance", "when": "exit", "mode": "required", "ask": "代表页与真机/浏览器验收是否通过？"}],
+      "skippable": true
+    },
+    {
+      "id": "qa",
+      "title": "QA 与效果评测",
+      "skill": "qa-eval",
+      "permission_profile": "P2",
+      "artifacts": ["factory/eval/plan.md", "factory/eval/cases.jsonl", "factory/eval/report.md"],
+      "min_evidence": "real_passed",
+      "approvals": [],
+      "skippable": false
+    },
+    {
+      "id": "release",
+      "title": "发布上线",
+      "skill": "agent-release-readiness",
+      "permission_profile": "P3",
+      "artifacts": ["factory/release/record.md"],
+      "min_evidence": "production_verified",
+      "approvals": [
+        {"id": "release_go", "when": "before_action", "mode": "required", "ask": "目标平台/账号/环境、预计费用、公开范围、数据迁移是否授权执行？"},
+        {"id": "launch_acceptance", "when": "exit", "mode": "required", "ask": "按上线验收清单逐项验证后是否接受上线？"}
+      ],
+      "skippable": false
+    },
+    {
+      "id": "operate",
+      "title": "运营与迭代",
+      "skill": "product-factory",
+      "permission_profile": "P1",
+      "artifacts": ["factory/feedback.md"],
+      "min_evidence": "planned",
+      "approvals": [],
+      "skippable": false,
+      "terminal": true
+    }
+  ],
+  "permission_profiles": {
+    "P0": "只读：读需求、代码与资料，只写 factory/ 下文档；不调用付费模型、不改代码、不触达外部系统",
+    "P1": "工作区写：可改本产品仓库代码与文档、运行本地测试；不调用付费服务、不碰云资源",
+    "P2": "P1 + 在预算内调用已授权的真实模型/第三方测试接口；凭据只经 .env 或密钥管理注入",
+    "P3": "P2 + 在 release_go 授权范围内操作云平台；新增计费、破坏性数据操作、公开私有资源须单独授权"
+  }
+}

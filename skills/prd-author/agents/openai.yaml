@@ -1,0 +1,4 @@
+interface:
+  display_name: "PRD 撰写"
+  short_description: "把想法问清楚，写成带编号验收标准、红线与降级方案的 AI 产品 PRD"
+  default_prompt: "使用 $prd-author，根据我的想法分轮澄清关键问题，再写出可验收的 PRD；不做技术选型。"

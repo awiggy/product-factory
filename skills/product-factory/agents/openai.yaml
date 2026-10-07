@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI 产品工厂"
+  short_description: "按 PRD→蓝图→适配→MVP→前端→QA→上线→迭代推进产品，运行闸门并停在审批点"
+  default_prompt: "使用 $product-factory，查看当前产品处于哪个阶段，完成本阶段工作并运行闸门检查，需要审批时停下给我摘要。"

@@ -1,0 +1,320 @@
+"""控制台后端测试（仅标准库）。运行：cd console && python3 -m unittest discover -s tests -v"""
+
+import json
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+os.environ["FACTORY_DEMO_DELAY"] = "0"
+
+from factory_console import app, executors, gate, products as pr, runner, secrets  # noqa: E402
+from factory_console import inbox as ib  # noqa: E402
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["FACTORY_SECRETS_FILE"] = os.path.join(self.tmp, "secrets", "secrets.json")
+        secrets.FILE_PATH = os.environ["FACTORY_SECRETS_FILE"]
+        self._cfg = pr.CONFIG_PATH
+        pr.CONFIG_PATH = os.path.join(self.tmp, "config.json")
+        pr.update_config({"workspace": os.path.join(self.tmp, "products"), "user_name": "测试"})
+
+    def tearDown(self):
+        pr.CONFIG_PATH = self._cfg
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def wait(self, pid, timeout=10):
+        end = time.time() + timeout
+        while time.time() < end:
+            if not runner.busy(pid):
+                return pr.detail(pid, runner.active_meta(pid))
+            time.sleep(0.02)
+        self.fail("运行超时")
+
+    def run_and_wait(self, pid, mode):
+        runner.start(pid, mode)
+        return self.wait(pid)
+
+
+class DemoFlowTest(Base):
+    def test_full_demo_flow(self):
+        pid = pr.create_product("演示", "", demo=True)
+        d = self.run_and_wait(pid, "start")
+        self.assertEqual(d["next_action"]["kind"], "answer")
+        with self.assertRaises(pr.UserError):
+            pr.save_answers(pid, {"q1": "研究生"})          # 必答题没答完
+        pr.save_answers(pid, {"q1": "研究生", "q2": "两者都要", "q3": "可以"})
+        d = self.run_and_wait(pid, "continue")
+        self.assertEqual(d["next_action"]["kind"], "approve")
+        with self.assertRaises(pr.UserError):
+            pr.approve(pid, "prd_signoff", "确认", acknowledged=False)   # 有未验证项必须先确认
+        pr.approve(pid, "prd_signoff", "确认", acknowledged=True)
+        self.assertEqual(pr.detail(pid)["next_action"]["kind"], "advance")
+        pr.advance(pid)
+        self.run_and_wait(pid, "start")
+        pr.approve(pid, "blueprint_signoff", "确认", acknowledged=True)
+        pr.advance(pid)
+        d = self.run_and_wait(pid, "start")                 # adaptation 无需审批
+        self.assertEqual(d["next_action"]["kind"], "advance")
+        pr.advance(pid)
+        d = self.run_and_wait(pid, "start")                 # build：先要用户操作
+        self.assertEqual(d["next_action"]["kind"], "actions")
+        self.assertEqual(d["stage"]["level"], "mock_passed")
+        pr.save_actions(pid, ["a1"])
+        d = self.run_and_wait(pid, "continue")
+        self.assertEqual(d["next_action"]["kind"], "checklist")
+        with self.assertRaises(pr.UserError):
+            pr.approve(pid, "build_acceptance", "通过", acknowledged=True)  # 清单没走完不能签
+        res = {c["id"]: {"result": "pass"} for c in d["inbox"]["checklist"]}
+        res["c2"] = {"result": "fail", "note": "没反应"}
+        pr.save_checklist(pid, res)
+        d = pr.detail(pid)
+        self.assertEqual(d["next_action"]["kind"], "fix")
+        self.assertTrue(any("验收未通过" in b for b in d["stage"]["blockers"]))
+        d = self.run_and_wait(pid, "fix")
+        self.assertEqual(d["stage"]["blockers"], [])       # 新一轮清单，旧的失败阻塞清除
+        pr.save_checklist(pid, {c["id"]: {"result": "pass"} for c in d["inbox"]["checklist"]})
+        pr.approve(pid, "build_acceptance", "通过", acknowledged=True)
+        pr.advance(pid)
+        d = self.run_and_wait(pid, "start")
+        pr.save_checklist(pid, {c["id"]: {"result": "pass"} for c in d["inbox"]["checklist"]})
+        pr.approve(pid, "frontend_acceptance", "通过", acknowledged=True)
+        pr.advance(pid)
+        self.run_and_wait(pid, "start")
+        pr.advance(pid)                                     # qa 无审批
+        d = self.run_and_wait(pid, "start")
+        self.assertEqual(d["current_stage"], "release")
+        with self.assertRaises(pr.UserError):
+            runner.start(pid, "deploy")                     # 未授权不能部署
+        pr.save_actions(pid, ["a1", "a2"])
+        self.assertEqual(pr.detail(pid)["next_action"]["kind"], "release_go")
+        with self.assertRaises(pr.UserError):
+            pr.approve(pid, "release_go", "同意", scope={"platform": "x"})  # 授权范围不完整
+        pr.approve(pid, "release_go", "同意", scope={"platform": "火山", "environment": "生产", "cost": "100 元",
+                                                    "visibility": "邀请码"})
+        self.assertEqual(pr.detail(pid)["next_action"]["kind"], "deploy")
+        d = self.run_and_wait(pid, "deploy")
+        self.assertEqual(d["stage"]["level"], "production_verified")
+        pr.save_checklist(pid, {c["id"]: {"result": "pass"} for c in d["inbox"]["checklist"]})
+        pr.approve(pid, "launch_acceptance", "上线", acknowledged=True)
+        pr.advance(pid)
+        d = self.run_and_wait(pid, "start")
+        self.assertEqual(d["current_stage"], "operate")
+        pr.iterate(pid, "批量上传")
+        d = pr.detail(pid)
+        self.assertEqual(d["product"]["version"], 2)
+        self.assertEqual(d["next_action"]["kind"], "start")
+        self.assertIsNone(d["inbox"])
+        approvals = [a for a in gate.load_state(d["path"])["approvals"]]
+        self.assertTrue(all(a.get("via") == "console" for a in approvals))
+
+    def test_feedback_and_skip(self):
+        pid = pr.create_product("演示", "", demo=True)
+        self.run_and_wait(pid, "start")
+        pr.save_answers(pid, {"q1": "a", "q2": "两者都要", "q3": "可以"})
+        self.run_and_wait(pid, "continue")
+        pr.add_feedback(pid, "revise", "范围再小一点")
+        self.assertEqual(pr.detail(pid)["next_action"]["kind"], "continue")
+        d = self.run_and_wait(pid, "continue")
+        self.assertEqual(d["pending_feedback"], [])
+        with open(os.path.join(d["path"], "factory", "prd.md"), encoding="utf-8") as f:
+            self.assertIn("范围再小一点", f.read())
+        with self.assertRaises((pr.UserError, gate.GateError)):
+            pr.skip(pid, "不需要")                           # prd 不可跳过
+
+
+class ClaudeExecutorTest(Base):
+    def wrapper(self, name, script):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as f:
+            f.write('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, os.path.join(HERE, script)))
+        os.chmod(path, 0o755)
+        return path
+
+    def test_fake_claude_guards(self):
+        fake = self.wrapper("claude", "fake_claude.py")
+        logf = os.path.join(self.tmp, "args.log")
+        os.environ["FAKE_CLAUDE_LOG"] = logf
+        pr.update_config({"executor": "claude", "claude_path": fake, "budget_per_run_usd": 2})
+        pid = pr.create_product("真产品", "做一个论文助手")
+        d = self.run_and_wait(pid, "start")
+        run = d["runs"][0]
+        self.assertEqual(run["status"], "succeeded", run.get("error"))
+        self.assertEqual(run["cost_usd"], 0.0123)
+        self.assertTrue(any("state.json" in n for n in run["notes"]))       # 篡改被发现
+        state = gate.load_state(d["path"])
+        self.assertEqual(state["approvals"], [])                           # 伪造审批被撤销
+        self.assertNotEqual(d["stage"]["level"], "production_verified")    # 越级证据不被接受
+        self.assertEqual(d["next_action"]["kind"], "answer")
+        with open(logf, encoding="utf-8") as f:
+            args = json.loads(f.readlines()[-1])
+        self.assertEqual(args[-2], "-p")
+        self.assertIn("dontAsk", args)                                     # prd 阶段只读档位
+        self.assertIn("--add-dir", args)
+        self.assertIn("Edit(./factory/state.json)", args)
+        self.assertEqual(args[args.index("--max-budget-usd") + 1], "2.0")
+        sessions = ib.read_json(os.path.join(d["path"], "factory", "runs", "sessions.json"))
+        self.assertEqual(sessions["prd"], "sess-123")
+        # 继续时接着上次的对话
+        pr.save_answers(pid, {"q1": "研究生"})
+        self.run_and_wait(pid, "continue")
+        with open(logf, encoding="utf-8") as f:
+            args = json.loads(f.readlines()[-1])
+        self.assertIn("--resume", args)
+        prompt = args[-1]
+        self.assertIn("问：给谁用？", prompt)
+        self.assertIn("答：研究生", prompt)
+        info = executors.detect(pr.load_config())
+        self.assertTrue(info["claude"]["found"])
+        self.assertTrue(info["claude"]["logged_in"])
+
+    def test_provider_api_key(self):
+        fake = self.wrapper("claude", "fake_claude.py")
+        envlog = os.path.join(self.tmp, "env.log")
+        os.environ["FAKE_CLAUDE_ENVLOG"] = envlog
+        os.environ["FAKE_CLAUDE_LOG"] = os.path.join(self.tmp, "args2.log")
+        pr.update_config({"executor": "claude", "claude_path": fake, "claude_source": "provider",
+                          "provider_id": "deepseek", "provider_base_url": "https://api.deepseek.com/anthropic",
+                          "provider_model": "deepseek-v4-pro"})
+        pid = pr.create_product("第三方", "一个想法")
+        with self.assertRaises(pr.UserError):
+            runner.start(pid, "start")                    # 还没保存 Key
+        secrets.set_secret(executors.provider_account("deepseek"), "sk-test-1234567890")
+        self.assertEqual(secrets.masked(executors.provider_account("deepseek")), "已保存（尾号 7890）")
+        self.assertEqual(oct(os.stat(secrets.FILE_PATH).st_mode & 0o777), "0o600")
+        d = self.run_and_wait(pid, "start")
+        self.assertEqual(d["runs"][0]["status"], "succeeded", d["runs"][0].get("error"))
+        self.assertIsNone(d["runs"][0]["cost_usd"])       # 第三方不按 Claude 价格估算
+        with open(envlog) as f:
+            env = json.loads(f.readlines()[-1])
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://api.deepseek.com/anthropic")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "sk-test-1234567890")
+        self.assertEqual(env["ANTHROPIC_MODEL"], "deepseek-v4-pro")
+        self.assertIsNone(env["ANTHROPIC_API_KEY"])
+        for root, _, files in os.walk(d["path"]):          # Key 不出现在产品文件里
+            for fn in files:
+                with open(os.path.join(root, fn), "rb") as f:
+                    self.assertNotIn(b"sk-test-1234567890", f.read())
+        self.assertTrue(executors.test_connection(pr.load_config())["ok"])
+
+    def test_codex(self):
+        fake = self.wrapper("codex", "fake_codex.py")
+        logf = os.path.join(self.tmp, "codex.log")
+        os.environ["FAKE_CODEX_LOG"] = logf
+        pr.update_config({"executor": "codex", "codex_path": fake})
+        info = executors.detect(pr.load_config())["codex"]
+        self.assertTrue(info["found"] and info["logged_in"])
+        pid = pr.create_product("Codex 产品", "一个想法")
+        d = self.run_and_wait(pid, "start")
+        run = d["runs"][0]
+        self.assertEqual(run["status"], "succeeded", run.get("error"))
+        self.assertEqual(run["tokens"], {"input": 1200, "output": 300})
+        self.assertEqual(d["next_action"]["kind"], "answer")
+        with open(logf) as f:
+            rec = [json.loads(l) for l in f if '"exec"' in l][-1]
+        args = rec["args"]
+        self.assertEqual(args[:2], ["exec", "--json"])
+        self.assertIn("workspace-write", args)
+        self.assertNotIn("sandbox_workspace_write.network_access=true", args)   # 需求阶段不联网
+        self.assertFalse(rec["has_key"])
+        meta = runner.get_run(pid, run["id"])
+        texts = [a["text"] for a in meta["activity"]]
+        self.assertIn("运行命令：cat factory/idea.md", texts)
+        self.assertIn("写入 factory/inbox/prd.json", texts)
+        # API Key 方式
+        pr.update_config({"codex_source": "api_key"})
+        self.assertIn("OpenAI", executors.ready_problem(pr.load_config()))
+        secrets.set_secret(executors.OPENAI_ACCOUNT, "sk-openai-abcdefgh")
+        self.assertTrue(executors.test_connection(pr.load_config())["ok"])
+        with open(logf) as f:
+            self.assertTrue(json.loads(f.readlines()[-1])["has_key"])
+
+    def test_manual_mode(self):
+        pr.update_config({"executor": "manual"})
+        pid = pr.create_product("手动", "一个想法")
+        meta = runner.start(pid, "start")
+        self.assertEqual(meta["status"], "waiting_manual")
+        self.assertIn("请在这个产品文件夹里工作", meta["prompt"])
+        self.assertEqual(pr.detail(pid, runner.active_meta(pid))["next_action"]["kind"], "manual_wait")
+        pdir = pr.find(pid)["path"]
+        ib.write_json(ib.path(pdir, "prd"), {"stage": "prd", "round": 1, "status": "needs_input", "summary": "s",
+                                             "questions": [{"id": "q1", "text": "谁用？"}]})
+        runner.manual_done(pid)
+        self.assertEqual(pr.detail(pid)["next_action"]["kind"], "answer")
+
+
+class HttpTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.srv = app.make_server(port=0)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        super().tearDown()
+
+    def call(self, method, path, body=None, headers=None):
+        h = {"X-Factory": "1", "Content-Type": "application/json"}
+        h.update(headers or {})
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path), method=method, headers=h,
+                                     data=json.dumps(body or {}).encode() if method == "POST" else None)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def test_security(self):
+        code, _ = self.call("POST", "/api/products/demo", headers={"X-Factory": ""})
+        self.assertEqual(code, 403)
+        code, _ = self.call("GET", "/api/products", headers={"Host": "evil.example:80"})
+        self.assertEqual(code, 403)
+        code, data = self.call("POST", "/api/products/demo")
+        pid = data["id"]
+        code, _ = self.call("GET", "/api/products/%s/doc?path=../../../etc/passwd" % pid)
+        self.assertEqual(code, 403)
+        code, _ = self.call("GET", "/api/products/%s/doc?path=factory/state.json" % pid)
+        self.assertEqual(code, 403)
+        code, data = self.call("GET", "/api/products/%s" % pid)
+        self.assertEqual(code, 200)
+        self.assertEqual(data["next_action"]["kind"], "start")
+
+    def test_executor_api(self):
+        code, data = self.call("GET", "/api/executors")
+        self.assertEqual(code, 200)
+        self.assertIn("claude", data["detected"])
+        self.assertTrue(any(p["id"] == "deepseek" for p in data["providers"]))
+        code, data = self.call("POST", "/api/secrets", {"kind": "provider", "provider_id": "kimi-cn", "value": "sk-kimi-00001111"})
+        self.assertEqual(code, 200)
+        self.assertEqual(data["masked"], "已保存（尾号 1111）")
+        code, data = self.call("GET", "/api/executors")
+        self.assertEqual(data["provider_keys"]["kimi-cn"], "已保存（尾号 1111）")
+        self.assertNotIn("sk-kimi-00001111", json.dumps(data))
+        code, _ = self.call("POST", "/api/secrets", {"kind": "provider", "provider_id": "evil", "value": "x"})
+        self.assertEqual(code, 400)
+        code, _ = self.call("POST", "/api/config", {"provider_base_url": "http://insecure"})
+        self.assertEqual(code, 400)
+        self.call("POST", "/api/secrets/delete", {"kind": "provider", "provider_id": "kimi-cn"})
+        code, data = self.call("GET", "/api/executors")
+        self.assertIsNone(data["provider_keys"]["kimi-cn"])
+
+    def test_static(self):
+        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port) as r:
+            self.assertIn("产品工厂", r.read().decode("utf-8"))
+        with urllib.request.urlopen("http://127.0.0.1:%d/app.js" % self.port) as r:
+            self.assertIn("javascript", r.headers["Content-Type"])
+
+
+if __name__ == "__main__":
+    unittest.main()

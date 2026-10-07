@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI 产品阶段交付"
+  short_description: "从需求和现有代码出发，完成技术适配、业务闭环与真实验收交接"
+  default_prompt: "使用 $agent-mvp-delivery，基于当前项目实现一个明确的业务阶段，并提供真实的验收证据。"

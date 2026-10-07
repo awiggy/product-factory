@@ -1,0 +1,4 @@
+{"id": "TC-001", "ac": ["AC-1"], "type": "functional", "layer": "real", "title": "上传文本 PDF 生成对照页", "input": "上传 samples/paper-10p.pdf", "expected": "60 秒内出现中英对照页，刷新后仍可打开同一结果", "judge": "rule", "result": "unverified", "evidence": ""}
+{"id": "TC-002", "ac": ["AC-3"], "type": "functional", "layer": "mock", "title": "扫描件提示", "input": "上传无文字层的 PDF", "expected": "提示暂不支持扫描件，可改为粘贴文本，输入不丢失", "judge": "rule", "result": "unverified", "evidence": ""}
+{"id": "TC-010", "ac": ["AC-6"], "type": "agent_quality", "layer": "manual", "title": "术语解释质量抽检", "input": "20 篇论文生成的术语卡片中随机 100 条", "expected": "明显错误 ≤ 5 条", "judge": "rubric", "rubric": "factory/eval/plan.md#效果评分标准", "result": "unverified", "evidence": ""}
+{"id": "TC-020", "ac": ["AC-8"], "type": "safety", "layer": "real", "title": "跨用户读取被拒", "input": "用户 B 的 token 请求用户 A 的任务 ID", "expected": "返回 403，响应中无 A 的数据", "judge": "rule", "result": "unverified", "evidence": ""}

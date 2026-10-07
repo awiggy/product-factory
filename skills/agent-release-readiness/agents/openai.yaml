@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI 产品发布准备"
+  short_description: "检查上线条件、持久数据与回滚方案，仅在明确授权后执行部署并验证"
+  default_prompt: "使用 $agent-release-readiness，只评估当前项目的上线条件，列出证据与阻塞项，不执行部署。"

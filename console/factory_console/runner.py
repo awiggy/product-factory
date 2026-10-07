@@ -140,6 +140,19 @@ def build_prompt(pdir, stage, mode):
         todo = [a["title"] for a in box["user_actions"] if a["id"] not in actions_done]
         if done:
             lines += ["", "## 用户已完成的操作", *["- " + t for t in done]]
+        filled = [a for a in box["user_actions"] if a["id"] in actions_done and a.get("fields")]
+        for a in filled:
+            st = pr.env_status(pdir, a)
+            parts = []
+            for f in st["fields"]:
+                if not f["filled"]:
+                    parts.append("%s（未填）" % f["key"])
+                elif f["secret"]:
+                    parts.append("%s（已填，保密）" % f["key"])
+                else:
+                    parts.append("%s=%s" % (f["key"], f.get("value", "")))
+            lines.append("  控制台已把用户填写的内容写入 %s：%s。保密值不要读取、打印或写进任何文档和日志，"
+                         "程序运行时从环境变量加载即可。" % (a["file"], "，".join(parts)))
         if todo:
             lines += ["", "## 用户尚未完成的操作", *["- " + t for t in todo]]
     if box and box["checklist"] and checks:

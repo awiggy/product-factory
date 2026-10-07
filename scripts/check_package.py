@@ -116,8 +116,9 @@ def main():
             if fn.endswith(".md"):
                 check_links(os.path.join(docs, fn), docs, None)
 
+    user_data = {os.path.join(ROOT, "products"), os.path.join(ROOT, "console", "data")}   # 用户数据，已在 .gitignore 中
     for root, dirs, files in os.walk(ROOT):
-        dirs[:] = [x for x in dirs if x not in IGNORED_DIRS]
+        dirs[:] = [x for x in dirs if x not in IGNORED_DIRS and os.path.join(root, x) not in user_data]
         for dn in dirs:
             if dn in FORBIDDEN_DIRS:
                 err("不应分发的目录：%s" % os.path.relpath(os.path.join(root, dn), ROOT))

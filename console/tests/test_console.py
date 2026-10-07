@@ -69,7 +69,35 @@ class DemoFlowTest(Base):
         d = self.run_and_wait(pid, "start")                 # build：先要用户操作
         self.assertEqual(d["next_action"]["kind"], "actions")
         self.assertEqual(d["stage"]["level"], "mock_passed")
-        pr.save_actions(pid, ["a1"])
+        act = d["inbox"]["user_actions"][0]
+        self.assertEqual([f["key"] for f in act["fields"]], ["DEEPSEEK_API_KEY", "MODEL_ID"])
+        self.assertEqual(act["fields"][1]["value"], "deepseek-v4-flash")
+        with self.assertRaises(pr.UserError):
+            pr.save_env(pid, "a1", {"DEEPSEEK_API_KEY": ""})                 # 必填没填
+        pr.save_actions(pid, ["a1"])                                          # 填写类不能靠勾选完成
+        self.assertNotIn("a1", pr.detail(pid)["actions_done"])
+        pr.save_env(pid, "a1", {"DEEPSEEK_API_KEY": "sk-secret-123 x", "MODEL_ID": "deepseek-v4-pro"})
+        envp = os.path.join(d["path"], ".env")
+        with open(envp, encoding="utf-8") as f:
+            env = f.read()
+        self.assertIn('DEEPSEEK_API_KEY="sk-secret-123 x"', env)
+        self.assertIn("MODEL_ID=deepseek-v4-pro", env)
+        self.assertEqual(os.stat(envp).st_mode & 0o777, 0o600)
+        with open(os.path.join(d["path"], ".gitignore"), encoding="utf-8") as f:
+            self.assertIn(".env", f.read().split())
+        d = pr.detail(pid)
+        self.assertIn("a1", d["actions_done"])
+        self.assertNotIn("sk-secret", json.dumps(d, ensure_ascii=False))     # 页面拿不到 Key
+        f0 = d["inbox"]["user_actions"][0]["fields"][0]
+        self.assertTrue(f0["filled"] and "value" not in f0)
+        prompt = runner.build_prompt(d["path"], "build", "continue")
+        self.assertIn("DEEPSEEK_API_KEY（已填，保密）", prompt)
+        self.assertNotIn("sk-secret", prompt)                                 # AI 也拿不到
+        pr.save_env(pid, "a1", {"DEEPSEEK_API_KEY": "", "MODEL_ID": "deepseek-v4-flash"})   # 留空保持原值
+        with open(envp, encoding="utf-8") as f:
+            self.assertIn("sk-secret-123", f.read())
+        with self.assertRaises(pr.UserError):
+            pr.save_env(pid, "a1", {"MODEL_ID": "a\nEVIL=1"})
         d = self.run_and_wait(pid, "continue")
         self.assertEqual(d["next_action"]["kind"], "checklist")
         with self.assertRaises(pr.UserError):
@@ -130,6 +158,26 @@ class DemoFlowTest(Base):
             self.assertIn("范围再小一点", f.read())
         with self.assertRaises((pr.UserError, gate.GateError)):
             pr.skip(pid, "不需要")                           # prd 不可跳过
+
+
+class EnvFieldsTest(Base):
+    def test_old_style_steps_become_fields(self):
+        raw = {"status": "needs_input", "summary": "x", "user_actions": [{"id": "a1", "title": "填写模型 Key 和型号", "steps": [
+            "在产品文件夹里把 .env.example 复制一份，改名为 .env",
+            "在 LLM_API_KEY= 后面粘贴你的 DeepSeek Key",
+            "在 LLM_MODEL= 后面填型号名",
+            "可选：在 LLM_PRICE_INPUT_PER_M / LLM_PRICE_OUTPUT_PER_M 填每百万 token 的美元单价"]}]}
+        box, _ = ib.normalize(raw, "build")
+        fs = box["user_actions"][0]["fields"]
+        self.assertEqual([(f["key"], f["secret"], f["required"]) for f in fs], [
+            ("LLM_API_KEY", True, True), ("LLM_MODEL", False, True),
+            ("LLM_PRICE_INPUT_PER_M", False, False), ("LLM_PRICE_OUTPUT_PER_M", False, False)])
+        self.assertEqual(box["user_actions"][0]["file"], ".env")
+        self.assertEqual(ib.env_file("../../etc/passwd"), ".env")
+        self.assertEqual(ib.env_file("backend/.env"), "backend/.env")
+        self.assertEqual(ib.env_file(".env.example"), ".env")
+        raw["user_actions"][0]["steps"] = ["去官网注册账号"]
+        self.assertEqual(ib.normalize(raw, "build")[0]["user_actions"][0]["fields"], [])
 
 
 class ClaudeExecutorTest(Base):

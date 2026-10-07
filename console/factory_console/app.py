@@ -202,6 +202,15 @@ def actions(h, q, body, pid):
     return {"ok": True}
 
 
+@route("POST", r"/api/products/(?P<pid>[0-9a-f]{10})/env")
+def save_env(h, q, body, pid):
+    _not_busy(pid)
+    vals = body.get("values") or {}
+    if not isinstance(vals, dict):
+        raise pr.UserError("填写内容格式不对")
+    return pr.save_env(pid, str(body.get("action") or ""), vals)
+
+
 @route("POST", r"/api/products/(?P<pid>[0-9a-f]{10})/checklist")
 def checklist(h, q, body, pid):
     _not_busy(pid)

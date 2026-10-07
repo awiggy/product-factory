@@ -306,7 +306,7 @@ def detail(pid, active_run=None):
         "stages": stages,
         "levels": cfg["evidence_levels"], "level_names": g["levels"],
         "problems": probs,
-        "inbox": box, "inbox_problems": box_probs,
+        "inbox": _with_env_status(pdir, box), "inbox_problems": box_probs,
         "answers": answers, "checklist_results": checks, "actions_done": actions_done,
         "pending_feedback": pending_feedback,
         "approvals_needed": [{"id": a["id"], "name": g["approvals"].get(a["id"], a["id"]), "ask": a["ask"]}
@@ -345,7 +345,7 @@ def next_action(cur, d, st, state, probs, box, answers, checks, actions_done,
     open_actions = [a for a in box["user_actions"] if a["id"] not in actions_done]
     if open_actions:
         return {"kind": "actions", "title": "需要你本人完成 %d 件事" % len(open_actions),
-                "detail": "这些操作 AI 无法代办，照着步骤做完后勾选。"}
+                "detail": "这些操作 AI 无法代办：需要填写的直接填在下面，其他的照着步骤做完后勾选。"}
     if cur == "release" and not pending_feedback and box["status"] != "blocked":
         if release_go_needed and box.get("release_request"):
             return {"kind": "release_go", "title": "授权部署",
@@ -485,14 +485,140 @@ def save_answers(pid, answers):
     _merge_round(pdir, stage, ".answers", _round_key(box), clean)
 
 
+# ------------------------------------------------------------------ 配置文件（.env）
+
+def _env_abspath(pdir, rel):
+    p = os.path.realpath(os.path.join(pdir, ib.env_file(rel)))
+    root = os.path.realpath(pdir)
+    if not p.startswith(root + os.sep):
+        raise UserError("配置文件必须在产品文件夹里")
+    return p
+
+
+def _parse_env(text):
+    vals = {}
+    for line in (text or "").splitlines():
+        m = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
+        if not m:
+            continue
+        v = m.group(2).strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        elif " #" in v:
+            v = v.split(" #", 1)[0].rstrip()
+        vals[m.group(1)] = v
+    return vals
+
+
+def _read(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _with_env_status(pdir, box):
+    if not box or not any(a.get("fields") for a in box["user_actions"]):
+        return box
+    box = dict(box)
+    box["user_actions"] = [env_status(pdir, a) for a in box["user_actions"]]
+    return box
+
+
+def env_status(pdir, action):
+    """给界面用：每个字段是否已填写；非保密字段带上当前值或 .env.example 里的示例值。保密字段的值永不返回。"""
+    if not action.get("fields"):
+        return action
+    path = _env_abspath(pdir, action["file"])
+    cur = _parse_env(_read(path) or "")
+    example = _parse_env(_read(path + ".example") or _read(os.path.join(pdir, ".env.example")) or "")
+    a = dict(action)
+    a["fields"] = []
+    for f in action["fields"]:
+        f = dict(f)
+        f["filled"] = bool(cur.get(f["key"]))
+        if not f["secret"]:
+            f["value"] = cur.get(f["key"]) or f["default"] or example.get(f["key"], "")
+        a["fields"].append(f)
+    a["file_exists"] = os.path.exists(path)
+    return a
+
+
+def _env_quote(v):
+    if v == "" or re.match(r"^[A-Za-z0-9_./:@+,-]*$", v):
+        return v
+    return '"%s"' % v.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def save_env(pid, action_id, values):
+    """把用户在界面上填的值写进产品的 .env。值不进入收件箱、运行记录或给 AI 的指令。"""
+    pdir = find(pid)["path"]
+    stage = gate.load_state(pdir)["current_stage"]
+    box, _ = read_inbox(pdir, stage)
+    action = next((a for a in (box or {}).get("user_actions", []) if a["id"] == action_id), None)
+    if not action or not action.get("fields"):
+        raise UserError("这个操作没有需要填写的内容。")
+    path = _env_abspath(pdir, action["file"])
+    text = _read(path)
+    if text is None:
+        text = _read(path + ".example") or _read(os.path.join(pdir, ".env.example")) or ""
+    cur = _parse_env(text)
+    updates = {}
+    for f in action["fields"]:
+        v = values.get(f["key"])
+        v = "" if v is None else str(v).strip()
+        if "\n" in v or "\r" in v or len(v) > 4000:
+            raise UserError("%s 的值不能换行，也不能太长" % f["label"])
+        if not v:
+            if f["required"] and not cur.get(f["key"]):
+                raise UserError("还没填：%s" % f["label"])
+            continue                      # 留空表示保持原值
+        updates[f["key"]] = v
+    lines = text.splitlines()
+    for k, v in updates.items():
+        new = "%s=%s" % (k, _env_quote(v))
+        for i, line in enumerate(lines):
+            if re.match(r"^\s*(?:export\s+)?%s\s*=" % re.escape(k), line):
+                lines[i] = new
+                break
+        else:
+            lines.append(new)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(path + ".tmp", path)
+    os.chmod(path, 0o600)
+    _ensure_gitignored(pdir, os.path.relpath(path, pdir))
+    rk = _round_key(box)
+    done = (ib.read_json(ib.path(pdir, stage, ".actions"), {}) or {}).get(rk, [])
+    if action_id not in done:
+        _merge_round(pdir, stage, ".actions", rk, done + [action_id])
+    return {"written": sorted(updates), "file": os.path.relpath(path, pdir)}
+
+
+def _ensure_gitignored(pdir, rel):
+    gi = os.path.join(pdir, ".gitignore")
+    text = _read(gi) or ""
+    names = {l.strip() for l in text.splitlines()}
+    if rel in names or "/" + rel in names or (".env" in names and rel == ".env") or ".env*" in names:
+        return
+    with open(gi, "a", encoding="utf-8") as f:
+        f.write(("" if not text or text.endswith("\n") else "\n") + rel + "\n")
+
+
 def save_actions(pid, done_ids):
     pdir = find(pid)["path"]
     stage = gate.load_state(pdir)["current_stage"]
     box, _ = read_inbox(pdir, stage)
     if not box:
         raise UserError("现在没有待办操作。")
-    valid = {a["id"] for a in box["user_actions"]}
-    _merge_round(pdir, stage, ".actions", _round_key(box), [i for i in done_ids if i in valid])
+    valid = {a["id"] for a in box["user_actions"] if not a.get("fields")}
+    rk = _round_key(box)
+    prev = (ib.read_json(ib.path(pdir, stage, ".actions"), {}) or {}).get(rk, [])
+    keep = [i for i in prev if i not in valid]           # 填写类操作由 save_env 标记完成，这里不动
+    _merge_round(pdir, stage, ".actions", rk, keep + [i for i in done_ids if i in valid and i not in keep])
 
 
 def save_checklist(pid, results):

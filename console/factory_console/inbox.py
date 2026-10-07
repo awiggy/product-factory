@@ -2,11 +2,58 @@
 
 import json
 import os
+import re
 import tempfile
 
 STATUSES = {"needs_input", "ready_for_review", "blocked", "working"}
 Q_TYPES = {"text", "choice", "multi"}
 RESULTS = {"pass", "fail", "unverified", "n/a"}
+
+ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+_SECRET_HINT = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE", re.I)
+_KEY_IN_TEXT = re.compile(r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b")
+
+
+def env_file(rel):
+    """动作要写入的配置文件：只允许产品文件夹内、名字以 .env 开头或结尾的文件。"""
+    rel = str(rel or ".env").strip().replace("\\", "/")
+    parts = [p for p in rel.split("/") if p]
+    if not parts or rel.startswith("/") or any(p in (".", "..") for p in parts):
+        return ".env"
+    name = parts[-1]
+    if not (name.startswith(".env") or name.endswith(".env")) or name.endswith(".example"):
+        return ".env"
+    return "/".join(parts)
+
+
+def is_secret_key(key):
+    return bool(_SECRET_HINT.search(key))
+
+
+def _action_fields(a, steps):
+    out, seen = [], set()
+    for f in _list(a.get("fields")):
+        if not isinstance(f, dict) or not ENV_KEY.match(str(f.get("key", ""))) or f["key"] in seen:
+            continue
+        k = f["key"]
+        seen.add(k)
+        out.append({"key": k, "label": str(f.get("label") or k), "help": str(f.get("help") or ""),
+                    "secret": bool(f["secret"]) if "secret" in f else is_secret_key(k),
+                    "required": f.get("required", True) is not False, "default": str(f.get("default") or ""),
+                    "options": [str(o) for o in _list(f.get("options"))][:30]})
+    if out or a.get("fields") is not None:
+        return out
+    # 兼容旧写法：步骤里让用户去 .env 填 XXX_YYY= 的，自动变成输入框
+    if ".env" not in " ".join([str(a.get("title", ""))] + steps):
+        return []
+    for s in steps:
+        for k in _KEY_IN_TEXT.findall(s):
+            if k in seen or not ENV_KEY.match(k):
+                continue
+            seen.add(k)
+            out.append({"key": k, "label": k, "help": s, "secret": is_secret_key(k),
+                        "required": "可选" not in s and "optional" not in s.lower(), "default": "", "options": []})
+    return out
 
 
 def inbox_dir(product_dir):
@@ -83,9 +130,12 @@ def normalize(raw, stage):
     for i, a in enumerate(_list(raw.get("user_actions"))):
         if not isinstance(a, dict) or not a.get("title"):
             continue
+        steps = [str(s) for s in _list(a.get("steps"))]
+        fields = _action_fields(a, steps)
         box["user_actions"].append({
             "id": str(a.get("id") or "a%d" % (i + 1)), "title": str(a["title"]),
-            "steps": [str(s) for s in _list(a.get("steps"))], "done_when": str(a.get("done_when") or ""),
+            "steps": steps, "done_when": str(a.get("done_when") or ""),
+            "fields": fields, "file": env_file(a.get("file")) if fields else "",
         })
     for i, c in enumerate(_list(raw.get("checklist"))):
         if not isinstance(c, dict) or not c.get("do"):

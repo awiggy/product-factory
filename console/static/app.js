@@ -193,7 +193,10 @@ function paintProduct(force) {
   const taskSig = JSON.stringify([d.current_stage, d.next_action, d.inbox && d.inbox.round, d.active_run && d.active_run.id,
     d.active_run && d.active_run.status, d.checklist_results, d.actions_done, d.approvals_needed, d.release_go]);
   if (!editing("#p-task")) part("task", taskSig, "#p-task", taskHTML, afterTask);
-  part("docs", JSON.stringify([d.current_stage, d.stage.artifacts, d.inbox && d.inbox.round, d.docs]), "#p-docs", docsHTML, afterDocs);
+  const pick = $("#doc-pick");
+  if (!(pick && document.activeElement === pick)) {
+    part("docs", JSON.stringify([d.current_stage, d.stage.artifacts, d.inbox && d.inbox.round, d.docs]), "#p-docs", docsHTML, afterDocs);
+  }
   if (!editing("#p-side")) part("side", JSON.stringify([d.stage, d.problems, d.approvals, d.waivers, d.runs, d.cost_total_usd, App.open]), "#p-side", sideHTML);
   if (d.active_run && d.active_run.status === "running") pollFeed();
 }
@@ -202,7 +205,7 @@ function editing(sel) {
   const root = $(sel);
   if (!root) return false;
   const a = document.activeElement;
-  if (a && root.contains(a) && (a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && a.type === "text"))) return true;
+  if (a && root.contains(a) && (a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && (a.type === "text" || a.type === "password")))) return true;
   if (root.querySelector(".inline-form:not([hidden])")) return true;
   return !!root.querySelector("[data-dirty]");
 }
@@ -357,14 +360,39 @@ function answerForm(box, answers) {
     <span class="small muted">答不上来可以写“不确定”，AI 会把它记为待确认。</span></div></form>`;
 }
 
+function envFieldsHTML(a, done) {
+  const field = (f) => {
+    const name = `env:${a.id}:${f.key}`;
+    const lab = `${esc(f.label)}${f.required ? "" : "（可选）"}${f.label !== f.key ? ` <code>${esc(f.key)}</code>` : ""}`;
+    const state = f.filled ? ` <span class="pill pill-ok">已填写</span>` : "";
+    let input;
+    if (f.secret) {
+      input = `<input type="password" name="${esc(name)}" autocomplete="new-password" spellcheck="false"
+        placeholder="${f.filled ? "已填写；粘贴新值可替换，留空保持不变" : "粘贴到这里"}">`;
+    } else if (f.options && f.options.length) {
+      input = `<input type="text" name="${esc(name)}" list="dl-${esc(a.id + f.key)}" value="${esc(f.value || "")}">
+        <datalist id="dl-${esc(a.id + f.key)}">${f.options.map((o) => `<option value="${esc(o)}">`).join("")}</datalist>`;
+    } else {
+      input = `<input type="text" name="${esc(name)}" value="${esc(f.value || "")}" spellcheck="false">`;
+    }
+    const help = f.help && f.help !== f.key ? `<div class="hint">${esc(f.help)}</div>` : "";
+    return `<label class="field"><span>${lab}${state}</span>${input}${help}</label>`;
+  };
+  return `<div class="env-fields">${a.fields.map(field).join("")}
+    <div class="hint">保存后由控制台写入产品文件夹的 <code>${esc(a.file)}</code>（已加入 .gitignore，不会上传到 Git）。保密内容不会发给 AI，也不会再显示在页面上。</div>
+    ${done.includes(a.id) ? `<div class="small ok-text">已写入</div>` : ""}</div>`;
+}
+
 function actionsForm(box, done) {
   return `<form id="actions-form">${box.user_actions.map((a) => `
     <div class="action-card"><h4>${esc(a.title)}</h4>
-      ${a.steps.length ? "<ol>" + a.steps.map((s) => "<li>" + esc(s) + "</li>").join("") + "</ol>" : ""}
+      ${a.fields && a.fields.length
+        ? envFieldsHTML(a, done) + (a.steps.length ? `<details class="small"><summary class="muted">AI 写的原始说明</summary><ol>${a.steps.map((s) => "<li>" + esc(s) + "</li>").join("")}</ol></details>` : "")
+        : `${a.steps.length ? "<ol>" + a.steps.map((s) => "<li>" + esc(s) + "</li>").join("") + "</ol>" : ""}
       ${a.done_when ? `<div class="small muted" style="margin-bottom:8px">${esc(a.done_when)}</div>` : ""}
-      <label class="check-done"><input type="checkbox" name="done" value="${esc(a.id)}" ${done.includes(a.id) ? "checked" : ""}> 已完成</label>
+      <label class="check-done"><input type="checkbox" name="done" value="${esc(a.id)}" ${done.includes(a.id) ? "checked" : ""}> 已完成</label>`}
     </div>`).join("")}
-    <div class="btn-row"><button class="btn btn-primary" type="submit">保存</button>
+    <div class="btn-row"><button class="btn btn-primary" type="submit">保存${box.user_actions.some((a) => a.fields && a.fields.length) ? "并继续" : ""}</button>
     <span class="small muted">全部完成后，AI 才能继续往下做。</span></div></form>`;
 }
 
@@ -525,6 +553,7 @@ async function pollFeed(reset) {
 function docsHTML(d) {
   const arts = d.stage.artifacts.filter((a) => /\.(md|jsonl)$/.test(a.path));
   const others = d.docs.filter((p) => !arts.some((a) => a.path === p));
+  const short = (p) => p.replace(/^factory\//, "");
   if (App.docStage !== d.current_stage + d.product.version) {
     App.docStage = d.current_stage + d.product.version;
     App.docTab = null;
@@ -532,27 +561,32 @@ function docsHTML(d) {
   if (!App.docTab || (!arts.some((a) => a.path === App.docTab) && !others.includes(App.docTab))) {
     App.docTab = (arts.find((a) => a.exists) || arts[0] || {}).path || others[0] || null;
   }
-  const tab = (p, label, exists) => `<button role="tab" data-action="doc" data-path="${esc(p)}" aria-selected="${p === App.docTab}">${esc(label)}${exists ? "" : ' <span class="missing">（未生成）</span>'}</button>`;
+  const opt = (p, label) => `<option value="${esc(p)}" ${p === App.docTab ? "selected" : ""}>${esc(label)}</option>`;
+  const options = (arts.length ? `<optgroup label="本阶段">${arts.map((a) => opt(a.path, short(a.path) + (a.exists ? "" : "（未生成）"))).join("")}</optgroup>` : "") +
+    (others.length ? `<optgroup label="其他阶段">${others.map((p) => opt(p, short(p))).join("")}</optgroup>` : "");
   return `<section class="sheet docs" aria-label="文档">
-    <div class="doc-tabs" role="tablist">${arts.map((a) => tab(a.path, a.path.split("/").pop(), a.exists)).join("")}
-      ${others.length ? `<select id="doc-other" aria-label="其他文档" style="width:auto;margin:2px 0 6px auto;padding:4px 8px;font-size:13px">
-        <option value="">其他文档…</option>${others.map((p) => `<option value="${esc(p)}" ${p === App.docTab ? "selected" : ""}>${esc(p.replace("factory/", ""))}</option>`).join("")}</select>` : ""}
+    <div class="doc-bar"><span class="doc-bar-label">文档</span>
+      ${options ? `<select id="doc-pick" aria-label="选择要查看的文档">${options}</select>` : ""}
     </div><div class="doc-body" id="doc-body"><div class="doc-empty">还没有文档</div></div></section>`;
 }
 
 async function afterDocs() {
-  const sel = $("#doc-other");
-  if (sel) sel.addEventListener("change", () => { if (sel.value) { App.docTab = sel.value; App.sigs.docs = null; paintProduct(); } });
+  const sel = $("#doc-pick");
+  if (sel) sel.addEventListener("change", () => { App.docTab = sel.value; App.sigs.docs = null; paintProduct(); });
   const body = $("#doc-body");
   const d = App.detail;
   if (!App.docTab || !body) return;
-  const art = d.stage.artifacts.find((a) => a.path === App.docTab);
+  const want = App.docTab;
+  const token = (App.docToken = (App.docToken || 0) + 1);
+  const art = d.stage.artifacts.find((a) => a.path === want);
   if (art && !art.exists) {
     body.innerHTML = `<div class="doc-empty">AI 还没写这份文档。</div>`;
     return;
   }
+  if (App.docCache && App.docCache.path === want) body.innerHTML = App.docCache.html;   // 先显示上次的内容，避免闪烁
   try {
-    const { text } = await get(`/api/products/${d.id}/doc?path=${encodeURIComponent(App.docTab)}`);
+    const { text } = await get(`/api/products/${d.id}/doc?path=${encodeURIComponent(want)}`);
+    if (token !== App.docToken || App.docTab !== want) return;                           // 已经切到别的文档
     if (App.docTab.endsWith(".jsonl")) {
       const rows = text.trim().split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
       body.innerHTML = `<div class="md"><table><thead><tr><th>用例</th><th>验收标准</th><th>类型</th><th>预期</th><th>结果</th></tr></thead><tbody>` +
@@ -560,7 +594,9 @@ async function afterDocs() {
     } else {
       body.innerHTML = `<article class="md">${renderMarkdown(text)}</article>`;
     }
+    App.docCache = { path: want, html: body.innerHTML };
   } catch (e) {
+    if (token !== App.docToken) return;
     body.innerHTML = `<div class="doc-empty">${esc(e.message)}</div>`;
   }
 }
@@ -1056,9 +1092,18 @@ document.addEventListener("submit", async (e) => {
     }
     act(() => post(`/api/products/${App.pid}/answers`, { answers }), "回答已交给 AI");
   } else if (f.id === "actions-form") {
+    const acts = App.detail.inbox.user_actions;
     const done = [...f.querySelectorAll("input[name=done]:checked")].map((x) => x.value);
-    const all = done.length === App.detail.inbox.user_actions.length;
+    const envActs = acts.filter((a) => a.fields && a.fields.length);
+    const plain = acts.filter((a) => !(a.fields && a.fields.length));
+    const all = plain.every((a) => done.includes(a.id));
     act(async () => {
+      for (const a of envActs) {
+        const values = {};
+        a.fields.forEach((fl) => { const el = f.elements[`env:${a.id}:${fl.key}`]; if (el) values[fl.key] = el.value; });
+        await post(`/api/products/${App.pid}/env`, { action: a.id, values });
+        a.fields.forEach((fl) => { const el = f.elements[`env:${a.id}:${fl.key}`]; if (el && fl.secret) el.value = ""; });
+      }
       await post(`/api/products/${App.pid}/actions`, { done });
       if (all) {
         const d = await get("/api/products/" + App.pid);

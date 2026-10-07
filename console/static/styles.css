@@ -117,7 +117,7 @@ main { max-width: 1240px; margin: 0 auto; padding: 28px 24px 80px; }
 .serif { font-family: var(--serif); }
 label.field { display: block; margin-bottom: 14px; }
 label.field > span { display: block; font-size: 14px; color: var(--ink-2); margin-bottom: 6px; }
-input[type="text"], input[type="number"], textarea, select {
+input[type="text"], input[type="number"], input[type="password"], textarea, select {
   width: 100%; padding: 9px 12px; border: 1px solid var(--rule); border-radius: 6px;
   background: var(--sheet); color: var(--ink);
 }
@@ -302,10 +302,6 @@ details.ap-sec > ul { margin-top: 8px; }
 
 /* 文档 */
 .docs { padding: 0; overflow: hidden; }
-.doc-tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--rule); background: var(--sheet-2); overflow-x: auto; }
-.doc-tabs button { border: none; background: none; padding: 8px 12px; border-radius: 6px 6px 0 0; cursor: pointer; color: var(--ink-2); font-size: 14px; white-space: nowrap; }
-.doc-tabs button[aria-selected="true"] { background: var(--sheet); color: var(--ink); box-shadow: inset 0 -2px 0 var(--line); }
-.doc-tabs button .missing { color: var(--ink-3); }
 .doc-body { padding: 22px 26px 26px; max-height: 640px; overflow: auto; }
 .doc-empty { color: var(--ink-3); padding: 30px 0; text-align: center; }
 
@@ -408,3 +404,16 @@ details.ap-sec > ul { margin-top: 8px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition: none !important; }
 }
+
+/* ---------- 文档切换 ---------- */
+.doc-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--rule); background: var(--sheet-2); }
+.doc-bar-label { font-family: var(--serif); font-weight: 600; font-size: 16px; }
+.doc-bar select { width: auto; min-width: 0; max-width: 100%; padding: 6px 10px; font-size: 14px; }
+.doc-path { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
+
+/* ---------- 填写类操作 ---------- */
+.env-fields { display: grid; gap: 4px; margin: 6px 0 8px; }
+.env-fields code { font-size: 12px; color: var(--ink-3); }
+.env-fields .pill { margin-left: 6px; }
+.ok-text { color: var(--ok); font-weight: 600; }
+.action-card details { margin-top: 6px; }

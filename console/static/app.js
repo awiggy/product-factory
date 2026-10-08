@@ -190,7 +190,7 @@ function paintProduct(force) {
     if (cur && wrap.scrollWidth > wrap.clientWidth) wrap.scrollLeft = cur.offsetLeft - wrap.clientWidth / 2 + cur.offsetWidth / 2;
   });
   part("brief", JSON.stringify([d.current_stage, d.inbox && d.inbox.summary, d.stage.status]), "#p-brief", briefHTML);
-  part("preview", JSON.stringify([d.preview, d.active_run && d.active_run.status]), "#p-preview", previewHTML, afterPreview);
+  if (!typingIn("#p-preview")) part("preview", JSON.stringify([d.preview, d.has_config, d.active_run && d.active_run.status, App.cfg]), "#p-preview", previewHTML, afterPreview);
   const taskSig = JSON.stringify([d.current_stage, d.next_action, d.inbox && d.inbox.round, d.active_run && d.active_run.id,
     d.active_run && d.active_run.status, d.checklist_results, d.actions_done, d.approvals_needed, d.release_go, d.preview && d.preview.status]);
   if (!editing("#p-task")) part("task", taskSig, "#p-task", taskHTML, afterTask);
@@ -200,6 +200,15 @@ function paintProduct(force) {
   }
   if (!editing("#p-side")) part("side", JSON.stringify([d.stage, d.problems, d.approvals, d.waivers, d.runs, d.cost_total_usd, App.open]), "#p-side", sideHTML);
   if (d.active_run && d.active_run.status === "running") pollFeed();
+}
+
+// 只在用户正在输入（或填了还没保存）时暂停重绘；展开的表单本身不算
+function typingIn(sel) {
+  const root = $(sel);
+  if (!root) return false;
+  const a = document.activeElement;
+  if (a && root.contains(a) && a.tagName === "INPUT") return true;
+  return !!root.querySelector("[data-dirty]");
 }
 
 function editing(sel) {
@@ -422,13 +431,47 @@ function checklistHTML(d) {
     <div class="step-count">第 ${i + 1} 步，共 ${items.length} 步</div>
     <div class="step-box"><div class="do">${esc(c.do)}</div>
       ${d.preview && d.preview.available && /start\.sh|启动|终端/.test(c.do) ? `<div class="hint">启动这一步可以直接点上面的“${d.preview.status === "running" ? "打开页面" : "启动产品"}”，不用开终端。</div>` : ""}
-      ${c.expect ? `<div class="expect">应该看到：<b>${esc(c.expect)}</b></div>` : ""}</div>
+      ${c.expect ? `<div class="expect">应该看到：<b>${esc(c.expect)}</b></div>` : ""}
+      ${stepTools(d, c)}</div>
     <div class="btn-row"><button class="btn btn-pass" data-action="check-pass">和预期一样，通过</button>
       <button class="btn btn-fail" data-action="toggle" data-target="fail-form">不对</button>
       ${i > 0 ? `<button class="btn btn-quiet" data-action="check-back">上一步</button>` : ""}</div>
     <div class="inline-form" id="fail-form" ${r.result === "fail" ? "" : "hidden"}>
       <label class="field"><span>你看到了什么？（越具体，AI 越好修）</span><textarea id="fail-note">${esc(r.note || "")}</textarea></label>
       <button class="btn btn-fail" data-action="check-fail">记为不通过，下一步</button></div>`;
+}
+
+const FILE_RE = /(?:^|[\s“"'（(：:])((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:log|txt|jsonl|json|csv|md))(?=$|[\s”"'）)，。、；;:：])/g;
+
+function stepFiles(text) {
+  const out = [];
+  for (const m of text.matchAll(FILE_RE)) if (!out.includes(m[1]) && !/^https?:/.test(m[1])) out.push(m[1]);
+  return out.slice(0, 4);
+}
+
+function stepTools(d, c) {
+  const text = c.do + " " + (c.expect || "");
+  const files = stepFiles(text);
+  const wantsCfg = d.has_config && /\.env|Key|KEY|配置/.test(c.do);
+  if (!files.length && !wantsCfg) return "";
+  const fv = App.fileView;
+  return `<div class="step-tools">
+      ${wantsCfg ? `<button class="btn small" data-action="cfg-open">修改配置</button>` : ""}
+      ${files.map((f) => `<button class="btn small" data-action="file-view" data-path="${esc(f)}">查看 ${esc(f)}</button>`).join("")}
+    </div>
+    ${fv && files.includes(fv.path) ? fileViewHTML(fv) : ""}`;
+}
+
+function fileViewHTML(fv) {
+  if (fv.loading) return `<div class="file-view muted small">正在读取 ${esc(fv.path)}…</div>`;
+  if (fv.error) return `<div class="file-view small err">${esc(fv.error)}</div>`;
+  if (!fv.exists) return `<div class="file-view small muted">还没有 ${esc(fv.path)} 这个文件。可能产品还没运行过这一步。</div>`;
+  return `<div class="file-view">
+    <div class="file-view-head"><b>${esc(fv.path)}</b><span class="small muted">${fv.truncated ? "只显示最后 200KB" : (fv.size + " 字节")}</span>
+      <button class="btn btn-quiet small" data-action="file-view" data-path="${esc(fv.path)}">刷新</button>
+      <button class="btn btn-quiet small" data-action="file-close">收起</button></div>
+    ${fv.leaked_secrets.length ? `<div class="small err">⚠ 这个文件里出现了 ${esc(fv.leaked_secrets.join("、"))} 的真实值（已打码显示）。</div>` : `<div class="small ok-text">没有发现 .env 里保密项的值。</div>`}
+    <pre class="pv-log">${esc(fv.text || "（空文件）")}</pre></div>`;
 }
 
 function approvalCard(d) {
@@ -552,9 +595,32 @@ async function pollFeed(reset) {
 
 // ---------- 一键启动产品
 
+function configFormHTML(d) {
+  const c = App.cfg;
+  if (!c) return `<div class="inline-form cfg-form"><div class="muted small">正在读取配置…</div></div>`;
+  if (!c.available) return `<div class="inline-form cfg-form"><div class="muted small">这个产品还没有 .env 或 .env.example。</div></div>`;
+  const running = d.preview && d.preview.status === "running";
+  const row = (f) => `<label class="field"><span><code>${esc(f.key)}</code>${f.secret ? ` <span class="pill ${f.filled ? "pill-ok" : "pill-due"}">${f.filled ? "已填写" : "未填写"}</span>` : ""}</span>
+    ${f.secret ? `<input type="password" name="cfg:${esc(f.key)}" autocomplete="new-password" spellcheck="false" placeholder="${f.filled ? "已填写；粘贴新值可替换，留空保持不变" : "粘贴到这里"}">`
+      : `<input type="text" name="cfg:${esc(f.key)}" value="${esc(f.value || "")}" placeholder="${esc(f.example || "")}" spellcheck="false">`}</label>`;
+  return `<form class="inline-form cfg-form" id="cfg-form">
+    <h4>修改配置 <code>${esc(c.file)}</code></h4>
+    ${c.fields.length ? c.fields.map(row).join("") : `<p class="small muted">文件里还没有配置项。</p>`}
+    <div class="btn-row">
+      ${running ? `<button class="btn btn-primary" type="submit" data-restart="1">保存并重启产品</button><button class="btn" type="submit">只保存</button>` : `<button class="btn btn-primary" type="submit">保存</button>`}
+      <button class="btn btn-quiet" type="button" data-action="cfg-close">收起</button></div>
+    <div class="hint">只写入你电脑上的 ${esc(c.file)}（不会上传到 Git）。保密值不会显示，也不会发给 AI。改了配置要重启产品才生效。</div>
+  </form>`;
+}
+
 function previewHTML(d) {
   const p = d.preview;
-  if (!p || !p.available) return "";
+  if ((!p || !p.available) && !d.has_config) return "";
+  if (!p || !p.available) {
+    return `<section class="sheet preview-bar" aria-label="产品配置"><div class="pv-main"><div class="pv-state"><b>产品配置</b></div>
+      <div class="btn-row"><button class="btn" data-action="cfg-toggle">${App.cfgOpen ? "收起配置" : "修改配置"}</button></div></div>
+      ${App.cfgOpen ? configFormHTML(d) : ""}</section>`;
+  }
   const aiBusy = d.active_run && d.active_run.status === "running";
   const st = p.status;
   const label = { idle: "产品还没启动", starting: "正在启动…", running: "产品运行中", exited: "产品已退出",
@@ -568,6 +634,7 @@ function previewHTML(d) {
   } else if (st === "starting") {
     btns = `<button class="btn btn-quiet" data-action="preview-stop">停止</button>`;
   } else btns = startBtn;
+  if (d.has_config) btns += `<button class="btn" data-action="cfg-toggle">${App.cfgOpen ? "收起配置" : "修改配置"}</button>`;
   const hint = st === "starting" ? "第一次启动会安装依赖，可能要一两分钟。" :
     st === "running" ? "改了配置或代码后点“重启”。关掉控制台时会自动停止。" :
     aiBusy ? "AI 工作时不能启动，以免占用同一个端口。" : "";
@@ -579,6 +646,8 @@ function previewHTML(d) {
     </div>
     ${p.message ? `<div class="small ${st === "failed" || st === "exited" ? "err" : "muted"}">${esc(p.message)}</div>` : ""}
     <div class="hint">${hint ? esc(hint) + " " : ""}控制台会在产品文件夹里运行 <code>${esc(p.command)}</code>，不用开终端。</div>
+    ${p.leaked_secrets && p.leaked_secrets.length ? `<div class="small err">⚠ 运行日志里出现了 ${esc(p.leaked_secrets.join("、"))} 的真实值（下面已打码显示）。这是一个需要修复的问题。</div>` : ""}
+    ${App.cfgOpen ? configFormHTML(d) : ""}
     ${p.log ? `<details class="pv-log-wrap" ${App.pvLogOpen || st === "failed" || st === "exited" ? "open" : ""}><summary class="small muted">运行日志</summary><pre class="pv-log">${esc(p.log)}</pre></details>` : ""}
   </section>`;
 }
@@ -933,6 +1002,11 @@ function val(id) {
   return el ? el.value.trim() : "";
 }
 
+async function loadConfig() {
+  try { App.cfg = await get(`/api/products/${App.pid}/config`); }
+  catch (e) { App.cfg = { available: false }; toast(e.message, true); }
+}
+
 async function act(fn, okMsg) {
   try {
     await fn();
@@ -945,6 +1019,29 @@ async function act(fn, okMsg) {
 }
 
 const actions = {
+  async "cfg-toggle"() {
+    App.cfgOpen = !App.cfgOpen;
+    if (App.cfgOpen) { App.cfg = null; App.sigs.preview = null; paintProduct(); await loadConfig(); }
+    App.sigs.preview = null; paintProduct();
+  },
+  async "cfg-open"() {
+    App.cfgOpen = true; App.cfg = null; App.sigs.preview = null; paintProduct();
+    $("#p-preview").scrollIntoView({ behavior: "smooth", block: "start" });
+    await loadConfig(); App.sigs.preview = null; paintProduct();
+  },
+  "cfg-close"() {
+    App.cfgOpen = false;
+    const f = $("#cfg-form"); if (f) f.removeAttribute("data-dirty");
+    App.sigs.preview = null; paintProduct();
+  },
+  async "file-view"(el) {
+    const path = el.dataset.path;
+    App.fileView = { path, loading: true }; App.sigs.task = null; paintProduct();
+    try { App.fileView = await get(`/api/products/${App.pid}/file?path=${encodeURIComponent(path)}`); }
+    catch (e) { App.fileView = { path, error: e.message }; }
+    App.sigs.task = null; paintProduct();
+  },
+  "file-close"() { App.fileView = null; App.sigs.task = null; paintProduct(); },
   "preview-start"() { act(() => post(`/api/products/${App.pid}/preview/start`), "正在启动产品"); },
   "preview-stop"() { act(() => post(`/api/products/${App.pid}/preview/stop`), "已停止"); },
   "preview-restart"() {
@@ -1115,7 +1212,7 @@ document.addEventListener("click", (e) => {
 });
 
 document.addEventListener("input", (e) => {
-  const root = e.target.closest("#p-task, #p-side");
+  const root = e.target.closest("#p-task, #p-side, #p-preview");
   if (root && e.target.closest("form, .inline-form, .approval")) e.target.closest("section, form, .inline-form").setAttribute("data-dirty", "1");
 });
 
@@ -1161,6 +1258,16 @@ document.addEventListener("submit", async (e) => {
         if (d.next_action.kind === "continue") await post(`/api/products/${App.pid}/run`, { mode: "continue" });
       }
     }, all ? "已完成" : "已保存");
+  } else if (f.id === "cfg-form") {
+    const values = {};
+    (App.cfg.fields || []).forEach((fl) => { const el = f.elements["cfg:" + fl.key]; if (el) values[fl.key] = el.value; });
+    const restart = !!(e.submitter && e.submitter.dataset.restart);
+    act(async () => {
+      const r = await post(`/api/products/${App.pid}/config`, { values, restart });
+      App.cfgOpen = false; App.cfg = null;
+      f.removeAttribute("data-dirty");
+      toast(r.restarted ? "配置已保存，产品正在重启" : "配置已保存" + (App.detail.preview && App.detail.preview.status === "running" ? "，重启后生效" : ""));
+    });
   } else if (f.id === "settings-form") {
     try { await saveSettings(false); App.execInfo = await get("/api/executors"); paintExecCards(); }
     catch (err) { toast(err.message, true); }

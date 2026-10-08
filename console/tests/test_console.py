@@ -267,6 +267,43 @@ class PreviewTest(Base):
         self.assertFalse(preview._reachable("http://127.0.0.1:%d" % port))
 
 
+class ConfigAndFilesTest(Base):
+    def test_config_edit_and_file_view(self):
+        pid = pr.create_product("配置", "想法")
+        pdir = pr.find(pid)["path"]
+        with open(os.path.join(pdir, ".env.example"), "w") as f:
+            f.write("LLM_API_KEY=\nLLM_MODEL=deepseek-v4-flash\nPORT=8000\n")
+        self.assertTrue(pr.detail(pid)["has_config"])
+        c = pr.env_config(pid)
+        self.assertEqual([(f["key"], f["secret"], f["filled"]) for f in c["fields"]],
+                         [("LLM_API_KEY", True, False), ("LLM_MODEL", False, False), ("PORT", False, False)])
+        pr.save_env_config(pid, {"LLM_API_KEY": "sk-real-key-999", "LLM_MODEL": "deepseek-v4-pro", "PORT": "8000"})
+        c = pr.env_config(pid)
+        self.assertNotIn("sk-real", json.dumps(c))
+        self.assertTrue(c["fields"][0]["filled"])
+        pr.save_env_config(pid, {"LLM_API_KEY": "", "LLM_MODEL": "deepseek-v4-flash"})       # 保密项留空 = 不变
+        with open(os.path.join(pdir, ".env")) as f:
+            env = f.read()
+        self.assertIn("LLM_API_KEY=sk-real-key-999", env)
+        self.assertIn("LLM_MODEL=deepseek-v4-flash", env)
+        with self.assertRaises(pr.UserError):
+            pr.save_env_config(pid, {"EVIL": "1"})
+        # 查看日志：发现泄露时打码并警告
+        os.makedirs(os.path.join(pdir, "data"))
+        with open(os.path.join(pdir, "data", "app.log"), "w") as f:
+            f.write("ok\ncalling with sk-real-key-999\n")
+        v = pr.view_file(pid, "data/app.log")
+        self.assertEqual(v["leaked_secrets"], ["LLM_API_KEY"])
+        self.assertNotIn("sk-real", v["text"])
+        with open(os.path.join(pdir, "data", "app.log"), "w") as f:
+            f.write("clean\n")
+        self.assertEqual(pr.view_file(pid, "./data/app.log")["leaked_secrets"], [])
+        self.assertFalse(pr.view_file(pid, "data/none.log")["exists"])
+        for bad in (".env", "../x.log", "/etc/passwd", ".git/config", "data/.env.log", "start.sh"):
+            with self.assertRaises(pr.UserError, msg=bad):
+                pr.view_file(pid, bad)
+
+
 class ClaudeExecutorTest(Base):
     def wrapper(self, name, script):
         path = os.path.join(self.tmp, name)

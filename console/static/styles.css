@@ -431,3 +431,13 @@ details.ap-sec > ul { margin-top: 8px; }
 @media (prefers-reduced-motion: reduce) { .pv-dot.pv-starting { animation: none; } }
 .pv-log { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; background: var(--sheet-2); border: 1px solid var(--rule); border-radius: 6px; padding: 10px 12px; margin: 6px 0 0; }
 .btn-row a.btn { text-decoration: none; }
+
+/* ---------- 配置与文件查看 ---------- */
+.cfg-form { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--rule); }
+.cfg-form h4 { margin: 0 0 8px; font-size: 15px; }
+.cfg-form code, .step-tools code { font-size: 12px; }
+.step-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.btn.small { padding: 5px 10px; font-size: 13px; }
+.file-view { margin-top: 10px; border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; background: var(--sheet); }
+.file-view-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.file-view-head b { overflow-wrap: anywhere; }

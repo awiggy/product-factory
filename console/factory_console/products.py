@@ -308,7 +308,8 @@ def detail(pid, active_run=None):
         "levels": cfg["evidence_levels"], "level_names": g["levels"],
         "problems": probs,
         "inbox": _with_env_status(pdir, box), "inbox_problems": box_probs,
-        "preview": preview.status(pid, pdir, box),
+        "preview": _preview_status(pid, pdir, box),
+        "has_config": bool(_config_file(pdir)),
         "answers": answers, "checklist_results": checks, "actions_done": actions_done,
         "pending_feedback": pending_feedback,
         "approvals_needed": [{"id": a["id"], "name": g["approvals"].get(a["id"], a["id"]), "ask": a["ask"]}
@@ -520,6 +521,13 @@ def _read(path):
         return None
 
 
+def _preview_status(pid, pdir, box):
+    st = preview.status(pid, pdir, box)
+    if st.get("log"):
+        st["log"], st["leaked_secrets"] = redact_secrets(pdir, st["log"])
+    return st
+
+
 def _with_env_status(pdir, box):
     if not box or not any(a.get("fields") for a in box["user_actions"]):
         return box
@@ -577,7 +585,16 @@ def save_env(pid, action_id, values):
                 raise UserError("还没填：%s" % f["label"])
             continue                      # 留空表示保持原值
         updates[f["key"]] = v
-    lines = text.splitlines()
+    _write_env(pdir, path, text, updates)
+    rk = _round_key(box)
+    done = (ib.read_json(ib.path(pdir, stage, ".actions"), {}) or {}).get(rk, [])
+    if action_id not in done:
+        _merge_round(pdir, stage, ".actions", rk, done + [action_id])
+    return {"written": sorted(updates), "file": os.path.relpath(path, pdir)}
+
+
+def _write_env(pdir, path, text, updates):
+    lines = (text or "").splitlines()
     for k, v in updates.items():
         new = "%s=%s" % (k, _env_quote(v))
         for i, line in enumerate(lines):
@@ -593,11 +610,114 @@ def save_env(pid, action_id, values):
     os.replace(path + ".tmp", path)
     os.chmod(path, 0o600)
     _ensure_gitignored(pdir, os.path.relpath(path, pdir))
-    rk = _round_key(box)
-    done = (ib.read_json(ib.path(pdir, stage, ".actions"), {}) or {}).get(rk, [])
-    if action_id not in done:
-        _merge_round(pdir, stage, ".actions", rk, done + [action_id])
-    return {"written": sorted(updates), "file": os.path.relpath(path, pdir)}
+
+
+# ------------------------------------------------------------------ 产品配置（随时修改 .env）
+
+ENV_CANDIDATES = [".env", "backend/.env", "server/.env", "app/.env"]
+
+
+def _config_file(pdir):
+    for rel in ENV_CANDIDATES:
+        p = os.path.join(pdir, rel)
+        if os.path.exists(p) or os.path.exists(p + ".example"):
+            return rel
+    return None
+
+
+def env_config(pid):
+    """产品的配置项：.env.example 与 .env 里的所有变量。保密值只返回“是否已填”。"""
+    pdir = find(pid)["path"]
+    rel = _config_file(pdir)
+    if not rel:
+        return {"available": False}
+    path = _env_abspath(pdir, rel)
+    cur = _parse_env(_read(path) or "")
+    example = _parse_env(_read(path + ".example") or "")
+    keys = list(example) + [k for k in cur if k not in example]
+    fields = []
+    for k in keys:
+        if not ib.ENV_KEY.match(k):
+            continue
+        secret = ib.is_secret_key(k)
+        f = {"key": k, "secret": secret, "filled": bool(cur.get(k)), "in_example": k in example}
+        if not secret:
+            f["value"] = cur.get(k, "")
+            f["example"] = example.get(k, "")
+        fields.append(f)
+    return {"available": True, "file": rel, "exists": os.path.exists(path), "fields": fields}
+
+
+def save_env_config(pid, values, clear=()):
+    pdir = find(pid)["path"]
+    rel = _config_file(pdir)
+    if not rel:
+        raise UserError("这个产品还没有 .env 或 .env.example。")
+    path = _env_abspath(pdir, rel)
+    text = _read(path)
+    if text is None:
+        text = _read(path + ".example") or ""
+    known = {f["key"] for f in env_config(pid)["fields"]}
+    updates = {}
+    for k, v in (values or {}).items():
+        if k not in known:
+            raise UserError("不认识的配置项：%s" % k)
+        v = "" if v is None else str(v).strip()
+        if "\n" in v or "\r" in v or len(v) > 4000:
+            raise UserError("%s 的值不能换行，也不能太长" % k)
+        if v or k in clear:
+            updates[k] = v
+        elif not ib.is_secret_key(k):
+            updates[k] = ""                 # 非保密项清空即写空；保密项留空表示保持原值
+    if updates:
+        _write_env(pdir, path, text, updates)
+    return {"written": sorted(updates), "file": rel}
+
+
+# ------------------------------------------------------------------ 查看产品里的文件（日志等）
+
+VIEW_EXT = {".log", ".txt", ".md", ".json", ".jsonl", ".csv", ".yaml", ".yml", ".toml", ".html", ".py", ".js", ".ts"}
+VIEW_MAX = 200_000
+
+
+def redact_secrets(pdir, text):
+    """把 .env 里保密项的真实值从文本中替换掉，并返回出现过的变量名。"""
+    leaks = []
+    rel_env = _config_file(pdir)
+    if rel_env and text:
+        cur = _parse_env(_read(os.path.join(pdir, rel_env)) or "")
+        for k, v in cur.items():
+            if ib.is_secret_key(k) and len(v) >= 6 and v in text:
+                leaks.append(k)
+                text = text.replace(v, "【%s 的值】" % k)
+    return text, leaks
+
+
+def view_file(pid, rel):
+    """只读查看产品文件夹里的文本文件（日志、输出等）。不允许 .env、.git 和文件夹外的路径。
+    如果文件里出现了 .env 中的保密值，打码显示并给出警告——这本身就是要发现的问题。"""
+    pdir = find(pid)["path"]
+    rel = str(rel or "").strip().replace("\\", "/")
+    if rel.startswith("./"):
+        rel = rel[2:]
+    parts = [x for x in rel.split("/") if x]
+    if not parts or rel.startswith("/") or any(x in (".", "..") for x in parts):
+        raise UserError("路径不对")
+    if parts[0] == ".git" or any(x.startswith(".env") for x in parts) or os.path.splitext(parts[-1])[1].lower() not in VIEW_EXT:
+        raise UserError("这类文件不能在这里查看")
+    p = os.path.realpath(os.path.join(pdir, *parts))
+    if not p.startswith(os.path.realpath(pdir) + os.sep):
+        raise UserError("只能查看产品文件夹里的文件")
+    if not os.path.isfile(p):
+        return {"path": "/".join(parts), "exists": False}
+    size = os.path.getsize(p)
+    with open(p, "rb") as f:
+        if size > VIEW_MAX:
+            f.seek(size - VIEW_MAX)
+        text = f.read().decode("utf-8", "replace")
+    text, leaks = redact_secrets(pdir, text)
+    return {"path": "/".join(parts), "exists": True, "size": size, "truncated": size > VIEW_MAX,
+            "text": text, "leaked_secrets": leaks}
 
 
 def _ensure_gitignored(pdir, rel):

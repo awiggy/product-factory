@@ -223,13 +223,40 @@ def preview_start(h, q, body, pid):
 def preview_stop(h, q, body, pid):
     preview.stop(pid, "你停止了预览。")
     pdir, box = _preview_box(pid)
-    return preview.status(pid, pdir, box)
+    return pr._preview_status(pid, pdir, box)
 
 
 @route("GET", r"/api/products/(?P<pid>[0-9a-f]{10})/preview")
 def preview_get(h, q, body, pid):
     pdir, box = _preview_box(pid)
-    return preview.status(pid, pdir, box)
+    return pr._preview_status(pid, pdir, box)
+
+
+@route("GET", r"/api/products/(?P<pid>[0-9a-f]{10})/config")
+def get_env_config(h, q, body, pid):
+    return pr.env_config(pid)
+
+
+@route("POST", r"/api/products/(?P<pid>[0-9a-f]{10})/config")
+def post_env_config(h, q, body, pid):
+    vals = body.get("values") or {}
+    if not isinstance(vals, dict):
+        raise pr.UserError("填写内容格式不对")
+    out = pr.save_env_config(pid, vals, body.get("clear") or [])
+    if body.get("restart"):
+        pdir, box = _preview_box(pid)
+        if preview.stop(pid):
+            try:
+                preview.start(pid, pdir, box)
+                out["restarted"] = True
+            except ValueError as e:
+                raise pr.UserError("配置已保存，但重启失败：%s" % e)
+    return out
+
+
+@route("GET", r"/api/products/(?P<pid>[0-9a-f]{10})/file")
+def get_product_file(h, q, body, pid):
+    return pr.view_file(pid, (q.get("path") or [""])[0])
 
 
 @route("POST", r"/api/products/(?P<pid>[0-9a-f]{10})/env")

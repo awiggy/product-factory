@@ -23,8 +23,9 @@ LOG_TAIL = 60
 
 _lock = threading.Lock()
 _procs = {}                  # pid -> Preview
+_learned = {}                # pid -> 从日志里学到的实际地址（推断的地址不对时用）
 
-_URL_RE = re.compile(r"https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{2,5})?(?:/[^\s，。、“”\"'）)]*)?")
+_URL_RE = re.compile(r"https?://(?:127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)(?::\d{2,5})?(?:/[^\s，。、“”\"'）)]*)?")
 _SCRIPT_RE = re.compile(r"(?:^|[\s`“\"'])(\./)?([A-Za-z0-9_./-]*start[A-Za-z0-9_.-]*\.sh)\b")
 
 
@@ -137,13 +138,19 @@ def status(pid, pdir, box):
         return dict(pv.meta(), available=True)
     if not sp:
         return {"available": False}
-    if pv and pv.spec == sp:
+    if pv and pv.spec["command"] == sp["command"]:
         return dict(pv.meta(), available=True)
-    return dict(Preview(pid, pdir, sp).meta(), available=True, log="")
+    return dict(Preview(pid, pdir, _with_learned(pid, sp)).meta(), available=True, log="")
+
+
+def _with_learned(pid, sp):
+    if sp and sp["source"] == "guess" and _learned.get(pid):
+        return dict(sp, url=_learned[pid])
+    return sp
 
 
 def start(pid, pdir, box):
-    sp = spec(pdir, box)
+    sp = _with_learned(pid, spec(pdir, box))
     if not sp:
         raise ValueError("这个产品还没有提供启动方式。")
     with _lock:
@@ -175,11 +182,23 @@ def start(pid, pdir, box):
     return pv.meta()
 
 
+def _adopt_logged_url(pv):
+    """地址是推断的或写错了：看程序自己在日志里打印的地址（uvicorn、vite、http.server 等都会打印）。"""
+    text = tail(pv.log_path, 30).replace("0.0.0.0", "127.0.0.1")
+    for u in dict.fromkeys(_URL_RE.findall(text)):
+        u = _local_url(u.rstrip("/.") + "/")
+        if u and u != pv.spec["url"] and _reachable(u, timeout=0.8):
+            pv.spec = dict(pv.spec, url=u)
+            _learned[pv.pid] = u
+            return True
+    return False
+
+
 def _watch(pv):
     deadline = time.time() + READY_TIMEOUT
     while pv.proc.poll() is None:
         if pv.status == "starting":
-            if _reachable(pv.spec["url"]):
+            if _reachable(pv.spec["url"]) or _adopt_logged_url(pv):
                 pv.status, pv.ready_at = "running", time.time()
             elif time.time() > deadline:
                 pv.message = "等了 %d 秒还打不开页面，已停止。看看下面的日志。" % READY_TIMEOUT

@@ -10,7 +10,6 @@ Q_TYPES = {"text", "choice", "multi"}
 RESULTS = {"pass", "fail", "unverified", "n/a"}
 
 ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
-_SECRET_HINT = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE", re.I)
 _KEY_IN_TEXT = re.compile(r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b")
 
 
@@ -26,8 +25,13 @@ def env_file(rel):
     return "/".join(parts)
 
 
+_SECRET_PARTS = {"KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "PWD", "CREDENTIAL",
+                 "CREDENTIALS", "COOKIE", "PRIVATE", "DSN"}
+
+
 def is_secret_key(key):
-    return bool(_SECRET_HINT.search(key))
+    """按变量名的组成部分判断是否保密：LLM_API_KEY、GITHUB_TOKEN 是；LLM_MAX_OUTPUT_TOKENS、KEYWORDS 不是。"""
+    return any(part in _SECRET_PARTS for part in str(key).upper().split("_"))
 
 
 def _action_fields(a, steps):

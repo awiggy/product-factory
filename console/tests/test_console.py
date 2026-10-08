@@ -173,6 +173,9 @@ class EnvFieldsTest(Base):
             ("LLM_API_KEY", True, True), ("LLM_MODEL", False, True),
             ("LLM_PRICE_INPUT_PER_M", False, False), ("LLM_PRICE_OUTPUT_PER_M", False, False)])
         self.assertEqual(box["user_actions"][0]["file"], ".env")
+        self.assertEqual([k for k in ("LLM_API_KEY", "GITHUB_TOKEN", "DB_PASSWORD", "LLM_MAX_OUTPUT_TOKENS",
+                                       "LLM_CONTEXT_TOKENS", "KEYWORDS", "MONKEY_COUNT") if ib.is_secret_key(k)],
+                         ["LLM_API_KEY", "GITHUB_TOKEN", "DB_PASSWORD"])
         self.assertEqual(ib.env_file("../../etc/passwd"), ".env")
         self.assertEqual(ib.env_file("backend/.env"), "backend/.env")
         self.assertEqual(ib.env_file(".env.example"), ".env")

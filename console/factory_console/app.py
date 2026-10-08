@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from . import STATIC_ROOT
 from . import executors as ex
 from . import gate
+from . import preview
 from . import products as pr
 from . import runner
 from . import secrets
@@ -200,6 +201,35 @@ def actions(h, q, body, pid):
     _not_busy(pid)
     pr.save_actions(pid, body.get("done") or [])
     return {"ok": True}
+
+
+def _preview_box(pid):
+    pdir = pr.find(pid)["path"]
+    box, _ = pr.read_inbox(pdir, gate.load_state(pdir)["current_stage"])
+    return pdir, box
+
+
+@route("POST", r"/api/products/(?P<pid>[0-9a-f]{10})/preview/start")
+def preview_start(h, q, body, pid):
+    _not_busy(pid)
+    pdir, box = _preview_box(pid)
+    try:
+        return preview.start(pid, pdir, box)
+    except ValueError as e:
+        raise pr.UserError(str(e))
+
+
+@route("POST", r"/api/products/(?P<pid>[0-9a-f]{10})/preview/stop")
+def preview_stop(h, q, body, pid):
+    preview.stop(pid, "你停止了预览。")
+    pdir, box = _preview_box(pid)
+    return preview.status(pid, pdir, box)
+
+
+@route("GET", r"/api/products/(?P<pid>[0-9a-f]{10})/preview")
+def preview_get(h, q, body, pid):
+    pdir, box = _preview_box(pid)
+    return preview.status(pid, pdir, box)
 
 
 @route("POST", r"/api/products/(?P<pid>[0-9a-f]{10})/env")

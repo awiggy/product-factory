@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 os.environ["FACTORY_DEMO_DELAY"] = "0"
 
-from factory_console import app, executors, gate, products as pr, runner, secrets  # noqa: E402
+from factory_console import app, executors, gate, preview, products as pr, runner, secrets  # noqa: E402
 from factory_console import inbox as ib  # noqa: E402
 
 
@@ -178,6 +178,93 @@ class EnvFieldsTest(Base):
         self.assertEqual(ib.env_file(".env.example"), ".env")
         raw["user_actions"][0]["steps"] = ["去官网注册账号"]
         self.assertEqual(ib.normalize(raw, "build")[0]["user_actions"][0]["fields"], [])
+
+
+class PreviewTest(Base):
+    def make(self, script, checklist_text, preview_field=None):
+        pid = pr.create_product("预览", "想法")
+        pdir = pr.find(pid)["path"]
+        with open(os.path.join(pdir, "start.sh"), "w") as f:
+            f.write(script)
+        os.chmod(os.path.join(pdir, "start.sh"), 0o755)
+        raw = {"stage": "prd", "status": "ready_for_review", "summary": "s",
+               "checklist": [{"id": "c1", "do": checklist_text, "expect": "看到页面"}]}
+        if preview_field:
+            raw["preview"] = preview_field
+        os.makedirs(ib.inbox_dir(pdir), exist_ok=True)
+        ib.write_json(ib.path(pdir, "prd"), raw)
+        return pid, pdir
+
+    def free_port(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    def wait_status(self, pid, want, timeout=20):
+        end = time.time() + timeout
+        while time.time() < end:
+            st = pr.detail(pid)["preview"]
+            if st["status"] in want:
+                return st
+            time.sleep(0.2)
+        self.fail("预览状态一直是 %s" % st)
+
+    def test_start_open_stop(self):
+        port = self.free_port()
+        script = '#!/bin/sh\necho "starting sk-abc123"\nexec "%s" -m http.server %d --bind 127.0.0.1\n' % (sys.executable, port)
+        pid, pdir = self.make(script, "在终端进入产品文件夹，运行 ./start.sh，浏览器打开 http://127.0.0.1:%d" % port)
+        st = pr.detail(pid)["preview"]
+        self.assertTrue(st["available"])
+        self.assertEqual((st["status"], st["command"], st["url"]), ("idle", "./start.sh", "http://127.0.0.1:%d" % port))
+        preview.start(pid, pdir, pr.read_inbox(pdir, "prd")[0])
+        st = self.wait_status(pid, ("running",))
+        self.assertNotIn("sk-abc123", st["log"])                 # 日志里的密钥打码
+        self.assertEqual(preview.start(pid, pdir, pr.read_inbox(pdir, "prd")[0])["status"], "running")  # 不重复启动
+        self.assertTrue(preview.stop(pid))
+        st = self.wait_status(pid, ("stopped",))
+        self.assertFalse(preview._reachable(st["url"]))
+        import http.server
+        srv = http.server.HTTPServer(("127.0.0.1", port), http.server.SimpleHTTPRequestHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with self.assertRaises(ValueError):                   # 端口被别的程序占着时给出提示
+                preview.start(pid, pdir, pr.read_inbox(pdir, "prd")[0])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_declared_preview_and_failure(self):
+        port = self.free_port()
+        pid, pdir = self.make("#!/bin/sh\necho boom; exit 3\n", "打开页面看看",
+                              {"command": "./start.sh", "url": "http://localhost:%d/app" % port})
+        self.assertEqual(pr.detail(pid)["preview"]["url"], "http://localhost:%d/app" % port)
+        preview.start(pid, pdir, pr.read_inbox(pdir, "prd")[0])
+        st = self.wait_status(pid, ("failed", "exited"))
+        self.assertIn("boom", st["log"])
+        self.assertIn("代码 3", st["message"])
+
+    def test_rejects_unsafe_specs(self):
+        pid, pdir = self.make("#!/bin/sh\n", "运行 ./start.sh", {"command": "../../bin/sh", "url": "http://127.0.0.1:1"})
+        box = pr.read_inbox(pdir, "prd")[0]
+        self.assertEqual(preview.spec(pdir, box)["command"], "start.sh")          # 回退为推断，且只用产品内脚本
+        box["preview"] = {"command": "./start.sh", "url": "http://example.com"}
+        box["checklist"] = []
+        self.assertIsNone(preview.spec(pdir, box))                                  # 非本机地址不接受
+        box["preview"] = {"command": "./start.sh; rm -rf ~", "url": "http://127.0.0.1:9"}
+        self.assertIsNone(preview.spec(pdir, box))                                  # 不接受 shell 拼接
+
+    def test_ai_run_stops_preview(self):
+        port = self.free_port()
+        script = '#!/bin/sh\nexec "%s" -m http.server %d --bind 127.0.0.1\n' % (sys.executable, port)
+        pid, pdir = self.make(script, "运行 ./start.sh 打开 http://127.0.0.1:%d" % port)
+        preview.start(pid, pdir, pr.read_inbox(pdir, "prd")[0])
+        self.wait_status(pid, ("running",))
+        self.run_and_wait(pid, "continue")                                          # 演示执行器
+        self.assertEqual(preview._procs[pid].status, "stopped")
+        self.assertFalse(preview._reachable("http://127.0.0.1:%d" % port))
 
 
 class ClaudeExecutorTest(Base):

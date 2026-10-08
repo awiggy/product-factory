@@ -417,3 +417,17 @@ details.ap-sec > ul { margin-top: 8px; }
 .env-fields .pill { margin-left: 6px; }
 .ok-text { color: var(--ok); font-weight: 600; }
 .action-card details { margin-top: 6px; }
+
+/* ---------- 一键启动产品 ---------- */
+.preview-bar { padding: 16px 20px; margin-bottom: 18px; }
+.pv-main { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+.pv-state { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.pv-state a { overflow-wrap: anywhere; }
+.pv-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ink-3); flex: none; }
+.pv-dot.pv-running { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.pv-dot.pv-starting { background: var(--due); animation: pv-pulse 1s ease-in-out infinite; }
+.pv-dot.pv-failed, .pv-dot.pv-exited { background: var(--bad); }
+@keyframes pv-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .pv-dot.pv-starting { animation: none; } }
+.pv-log { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; background: var(--sheet-2); border: 1px solid var(--rule); border-radius: 6px; padding: 10px 12px; margin: 6px 0 0; }
+.btn-row a.btn { text-decoration: none; }

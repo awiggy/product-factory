@@ -10,6 +10,7 @@ import time
 import uuid
 
 from . import INBOX_PROTOCOL, SKILLS_ROOT
+from . import preview
 from . import executors as ex
 from . import gate
 from . import inbox as ib
@@ -423,6 +424,8 @@ def start(pid, mode="continue"):
         run.emit("info", "已生成指令，等待你在 AI 助手里执行")
         run.save()
         return run.meta()
+    if executor != "manual" and preview.stop(pid, "AI 开始工作前已停止预览，避免占用同一个端口。"):
+        run.emit("info", "已停止正在运行的产品预览")
     threading.Thread(target=_worker, args=(run, cfg), daemon=True).start()
     if executor in ex.AUTO_EXECUTORS:
         threading.Thread(target=_watchdog, args=(run, float(cfg.get("max_minutes_per_run") or 45)), daemon=True).start()

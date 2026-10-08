@@ -11,6 +11,7 @@ import threading
 from . import DATA_ROOT, PACKAGE_ROOT
 from . import gate
 from . import inbox as ib
+from . import preview
 
 GUIDES_PATH = os.path.join(os.path.dirname(__file__), "guides.json")
 CONFIG_PATH = os.path.join(DATA_ROOT, "config.json")
@@ -307,6 +308,7 @@ def detail(pid, active_run=None):
         "levels": cfg["evidence_levels"], "level_names": g["levels"],
         "problems": probs,
         "inbox": _with_env_status(pdir, box), "inbox_problems": box_probs,
+        "preview": preview.status(pid, pdir, box),
         "answers": answers, "checklist_results": checks, "actions_done": actions_done,
         "pending_feedback": pending_feedback,
         "approvals_needed": [{"id": a["id"], "name": g["approvals"].get(a["id"], a["id"]), "ask": a["ask"]}

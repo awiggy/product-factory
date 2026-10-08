@@ -49,8 +49,9 @@
       "done_when": "能登录控制台后回来勾选"
     }
   ],
+  "preview": {"command": "./start.sh", "url": "http://127.0.0.1:8000"},
   "checklist": [
-    {"id": "c1", "do": "在终端运行 ./start.sh，然后打开 http://localhost:8000", "expect": "看到上传页面"}
+    {"id": "c1", "do": "点上方的“启动产品”，再点“打开页面”", "expect": "看到上传页面"}
   ],
   "evidence": [
     {"level": "mock_passed", "what": "后端单元测试全部通过", "how": "pytest -q", "result": "pass", "where": "factory/stages/handoff.md#验证证据", "env": "本地"}
@@ -76,7 +77,8 @@
 | `status` | `needs_input`：等待用户回答问题或完成操作；`ready_for_review`：本阶段产出已完成，等待验收或审批；`blocked`：遇到无法自行解决的问题；`working`：本次只完成了一部分，可以继续运行 |
 | `questions` | 只问会影响范围、架构、费用或隐私的问题，每轮最多 3 个。`type` 为 `text`、`choice`（单选）或 `multi`（多选），选择题要给 `options` |
 | `user_actions` | 必须由用户本人完成的操作：注册账号、填写 Key、在控制台点选。写成“照着做”的步骤。**要用户填写配置（Key、型号、地址、单价等）时必须用 `fields`**，见下文 |
-| `checklist` | 需要用户亲手验收的阶段（build、frontend、release）在 `ready_for_review` 时提供；每步写“做什么”和“应该看到什么” |
+| `preview` | 产品能在本机跑起来时提供：`command` 是产品文件夹里的启动脚本（如 `./start.sh`，不能带 `;`、`&&` 等 shell 拼接），`url` 是本机地址（`http://127.0.0.1:端口`）。控制台会显示“启动产品 / 打开页面 / 重启 / 停止”按钮，用户不用开终端 |
+| `checklist` | 需要用户亲手验收的阶段（build、frontend、release）在 `ready_for_review` 时提供；每步写“做什么”和“应该看到什么”。有 `preview` 时，启动步骤写“点上方的‘启动产品’”，改了配置后写“点‘重启’”，不要让用户开终端或手改 `.env`（要改配置用 `user_actions.fields`） |
 | `evidence` | 本次运行中实际执行过的验证；没运行的写 `unverified`，不要写 `pass`。等级不能超过本阶段要求 |
 | `blockers` | 当前仍然存在的阻塞（完整列表，不是增量）；没有就写空数组 |
 | `approval_required` | 仅 adaptation 阶段：技术适配声明“需要用户决定的问题”为“无”且没有新增费用/平台/数据外传时写 `false`，否则写 `true` |

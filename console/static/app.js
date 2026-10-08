@@ -167,7 +167,7 @@ async function loadProduct(pid, force = false) {
   if (App.pid !== pid) return;
   App.detail = d;
   paintProduct(force);
-  const busy = d.active_run && d.active_run.status === "running";
+  const busy = (d.active_run && d.active_run.status === "running") || (d.preview && d.preview.status === "starting");
   later(() => loadProduct(pid).catch(() => {}), busy ? 1500 : 5000);
 }
 
@@ -179,7 +179,7 @@ function paintProduct(force) {
       <div class="p-head" id="p-head"></div>
       <div class="line-wrap"><ol class="line" id="p-line" aria-label="生产线"></ol></div>
       <div class="bench">
-        <div><div id="p-brief"></div><div id="p-task"></div><div id="p-docs"></div></div>
+        <div><div id="p-brief"></div><div id="p-preview"></div><div id="p-task"></div><div id="p-docs"></div></div>
         <aside class="sheet inspect" id="p-side" aria-label="质检单"></aside>
       </div></div>`;
   }
@@ -190,8 +190,9 @@ function paintProduct(force) {
     if (cur && wrap.scrollWidth > wrap.clientWidth) wrap.scrollLeft = cur.offsetLeft - wrap.clientWidth / 2 + cur.offsetWidth / 2;
   });
   part("brief", JSON.stringify([d.current_stage, d.inbox && d.inbox.summary, d.stage.status]), "#p-brief", briefHTML);
+  part("preview", JSON.stringify([d.preview, d.active_run && d.active_run.status]), "#p-preview", previewHTML, afterPreview);
   const taskSig = JSON.stringify([d.current_stage, d.next_action, d.inbox && d.inbox.round, d.active_run && d.active_run.id,
-    d.active_run && d.active_run.status, d.checklist_results, d.actions_done, d.approvals_needed, d.release_go]);
+    d.active_run && d.active_run.status, d.checklist_results, d.actions_done, d.approvals_needed, d.release_go, d.preview && d.preview.status]);
   if (!editing("#p-task")) part("task", taskSig, "#p-task", taskHTML, afterTask);
   const pick = $("#doc-pick");
   if (!(pick && document.activeElement === pick)) {
@@ -420,6 +421,7 @@ function checklistHTML(d) {
   return `<div class="step-dots" aria-hidden="true">${dots}</div>
     <div class="step-count">第 ${i + 1} 步，共 ${items.length} 步</div>
     <div class="step-box"><div class="do">${esc(c.do)}</div>
+      ${d.preview && d.preview.available && /start\.sh|启动|终端/.test(c.do) ? `<div class="hint">启动这一步可以直接点上面的“${d.preview.status === "running" ? "打开页面" : "启动产品"}”，不用开终端。</div>` : ""}
       ${c.expect ? `<div class="expect">应该看到：<b>${esc(c.expect)}</b></div>` : ""}</div>
     <div class="btn-row"><button class="btn btn-pass" data-action="check-pass">和预期一样，通过</button>
       <button class="btn btn-fail" data-action="toggle" data-target="fail-form">不对</button>
@@ -545,6 +547,48 @@ async function pollFeed(reset) {
     }
   } catch (e) {
     feedTimer = null;
+  }
+}
+
+// ---------- 一键启动产品
+
+function previewHTML(d) {
+  const p = d.preview;
+  if (!p || !p.available) return "";
+  const aiBusy = d.active_run && d.active_run.status === "running";
+  const st = p.status;
+  const label = { idle: "产品还没启动", starting: "正在启动…", running: "产品运行中", exited: "产品已退出",
+    failed: "启动失败", stopped: "已停止" }[st] || st;
+  const startBtn = `<button class="btn btn-primary" data-action="preview-start" ${aiBusy ? "disabled" : ""}>${st === "idle" || st === "stopped" ? "▶ 启动产品" : "重新启动"}</button>`;
+  let btns;
+  if (st === "running") {
+    btns = `<a class="btn btn-primary" href="${esc(p.url)}" target="_blank" rel="noopener">打开页面 ↗</a>
+      <button class="btn" data-action="preview-restart" ${aiBusy ? "disabled" : ""}>重启</button>
+      <button class="btn btn-quiet" data-action="preview-stop">停止</button>`;
+  } else if (st === "starting") {
+    btns = `<button class="btn btn-quiet" data-action="preview-stop">停止</button>`;
+  } else btns = startBtn;
+  const hint = st === "starting" ? "第一次启动会安装依赖，可能要一两分钟。" :
+    st === "running" ? "改了配置或代码后点“重启”。关掉控制台时会自动停止。" :
+    aiBusy ? "AI 工作时不能启动，以免占用同一个端口。" : "";
+  return `<section class="sheet preview-bar" aria-label="产品预览">
+    <div class="pv-main">
+      <div class="pv-state"><span class="pv-dot pv-${esc(st)}" aria-hidden="true"></span><b>${esc(label)}</b>
+        ${st === "running" ? `<a class="small" href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a>` : ""}</div>
+      <div class="btn-row">${btns}</div>
+    </div>
+    ${p.message ? `<div class="small ${st === "failed" || st === "exited" ? "err" : "muted"}">${esc(p.message)}</div>` : ""}
+    <div class="hint">${hint ? esc(hint) + " " : ""}控制台会在产品文件夹里运行 <code>${esc(p.command)}</code>，不用开终端。</div>
+    ${p.log ? `<details class="pv-log-wrap" ${App.pvLogOpen || st === "failed" || st === "exited" ? "open" : ""}><summary class="small muted">运行日志</summary><pre class="pv-log">${esc(p.log)}</pre></details>` : ""}
+  </section>`;
+}
+
+function afterPreview(el) {
+  const det = el.querySelector(".pv-log-wrap");
+  if (det) {
+    det.addEventListener("toggle", () => { App.pvLogOpen = det.open; });
+    const pre = det.querySelector("pre");
+    if (pre) pre.scrollTop = pre.scrollHeight;
   }
 }
 
@@ -901,6 +945,11 @@ async function act(fn, okMsg) {
 }
 
 const actions = {
+  "preview-start"() { act(() => post(`/api/products/${App.pid}/preview/start`), "正在启动产品"); },
+  "preview-stop"() { act(() => post(`/api/products/${App.pid}/preview/stop`), "已停止"); },
+  "preview-restart"() {
+    act(async () => { await post(`/api/products/${App.pid}/preview/stop`); await post(`/api/products/${App.pid}/preview/start`); }, "正在重启");
+  },
   example(el) {
     const [n, t] = EXAMPLES[+el.dataset.i];
     const f = $("#new-form");

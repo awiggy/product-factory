@@ -13,6 +13,7 @@ if sys.version_info < (3, 9):
     sys.exit("需要 Python 3.9 或更高版本。当前是 %s。" % sys.version.split()[0])
 
 from factory_console.app import make_server  # noqa: E402
+from factory_console import preview  # noqa: E402
 
 
 def main():
@@ -30,9 +31,18 @@ def main():
     print("关闭这个窗口（或按 Ctrl+C）即可停止。")
     if not a.no_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    import signal
+
+    def _quit(*_):
+        raise KeyboardInterrupt
+
+    for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):      # 关掉终端窗口时也停掉产品预览
+        if sig is not None:
+            signal.signal(sig, _quit)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
+        preview.stop_all()
         print("\n已停止。")
 
 

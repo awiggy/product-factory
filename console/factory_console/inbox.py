@@ -105,6 +105,7 @@ def normalize(raw, stage):
         "approval_required": raw.get("approval_required") if raw.get("approval_required") in (True, False) else None,
         "approval_summary": None,
         "release_request": raw.get("release_request") if isinstance(raw.get("release_request"), dict) else None,
+        "preview": None,
     }
     if raw.get("stage") and raw.get("stage") != stage:
         probs.append("收件箱的 stage 是 %r，与当前阶段 %r 不一致" % (raw.get("stage"), stage))
@@ -137,6 +138,10 @@ def normalize(raw, stage):
             "steps": steps, "done_when": str(a.get("done_when") or ""),
             "fields": fields, "file": env_file(a.get("file")) if fields else "",
         })
+    pv = raw.get("preview")
+    if isinstance(pv, dict) and pv.get("command") and pv.get("url"):
+        box["preview"] = {"command": str(pv["command"])[:200], "url": str(pv["url"])[:200],
+                          "args": [str(x)[:80] for x in _list(pv.get("args"))][:10]}
     for i, c in enumerate(_list(raw.get("checklist"))):
         if not isinstance(c, dict) or not c.get("do"):
             continue
